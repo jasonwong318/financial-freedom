@@ -1,0 +1,7 @@
+sqlalchemy>=2.0
+pytest>=8.0
+pandas>=2.0
+# UI/行情(Sprint 2):
+streamlit>=1.30
+yfinance>=0.2
+# Sprint 3+: fastapi, uvicorn, alembic
