@@ -5,6 +5,8 @@
 - lots / lot_closures 由 FIFO 引擎維護,唔准手改
 - 「現時持倉收益」只計 qty_remaining > 0 嘅 lots — 呢個係同 StockerX 嘅根本差異
 """
+from datetime import datetime
+
 from sqlalchemy import (Column, Integer, Text, Numeric, TIMESTAMP, Date,
                         Boolean, ForeignKey, CheckConstraint, UniqueConstraint,
                         create_engine, JSON)
@@ -128,8 +130,10 @@ class RuleViolation(Base):
     id = Column(Integer, primary_key=True)
     rule_id = Column(Integer, ForeignKey("rules.id"))
     txn_id = Column(Integer, ForeignKey("transactions.id"))
+    violated_at = Column(TIMESTAMP, default=datetime.now)
     detail = Column(JSON)
     acknowledged = Column(Boolean, default=False)
+    rule = relationship("Rule")
 
 
 def make_session(url: str = "sqlite:///:memory:"):

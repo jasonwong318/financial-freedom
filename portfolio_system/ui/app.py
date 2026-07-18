@@ -1,4 +1,4 @@
-"""Streamlit UI — 規格書 §6 嘅第一版(總覽/持倉/已平倉)。
+"""Streamlit UI — 規格書 §6(Sprint 3 版:七頁)。
 
 跑法:
     pip install streamlit yfinance
@@ -9,14 +9,14 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from datetime import date
+from datetime import date, datetime
 import streamlit as st
 import pandas as pd
 
-from app.models import make_session
+from app.models import make_session, Transaction, Instrument, RuleViolation, Rule
 from app.importer import import_stockerx_csv
 from app.fifo import rebuild_lots
-from app import metrics
+from app import metrics, rules, behavior, assets, reports
 from app.prices import YFinanceProvider, ManualPriceProvider, store_eod, latest_prices
 from app.performance import portfolio_xirr, build_snapshot
 from app.config import to_hkd
@@ -31,10 +31,10 @@ st.set_page_config(page_title="Portfolio System", layout="wide")
 @st.cache_resource
 def get_session():
     s = make_session(DB_URL)
-    from app.models import Transaction
     if not s.query(Transaction).first():          # 首次啟動自動匯入
         import_stockerx_csv(s, CSV_DEFAULT)
         rebuild_lots(s)
+    rules.seed_rules(s)
     return s
 
 
@@ -59,7 +59,8 @@ with st.sidebar:
             if v > 0:
                 prices[sym] = v
 
-tab1, tab2, tab3 = st.tabs(["總覽", "持倉", "已平倉"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+    ["總覽", "持倉", "已平倉", "新增交易", "行為儀表板", "全資產", "報表"])
 
 # ---- 總覽(§6.1) ----
 with tab1:
@@ -117,3 +118,160 @@ with tab3:
                  use_container_width=True, hide_index=True)
     st.caption(f"共 {rs['rounds']} 回合 · 勝率 {rs['win_rate']:.1%} · "
                f"賺賠比 {rs['pl_ratio']:.2f} · 期望值 {rs['expectancy_hkd']:,.0f}/回合")
+
+# ---- 新增交易(§6.5:提交前跑規則引擎,violations 彈警示卡,可 override) ----
+with tab4:
+    st.subheader("新增交易(提交前自動過十條行為規則)")
+    with st.form("new_txn"):
+        c1, c2, c3 = st.columns(3)
+        f_symbol = c1.text_input("代號(e.g. TSLA / 0941.HK)").strip().upper()
+        f_side = c2.selectbox("方向", ["BUY", "SELL"])
+        f_date = c3.date_input("交易日", value=date.today())
+        c4, c5, c6 = st.columns(3)
+        f_price = c4.number_input("價格(原幣)", min_value=0.0, format="%.4f")
+        f_qty = c5.number_input("股數", min_value=0.0, format="%.4f")
+        f_fee = c6.number_input("手續費(原幣)", min_value=0.0, format="%.2f")
+        checked = st.form_submit_button("檢查規則")
+    if checked and f_symbol and f_qty > 0:
+        total = assets.total_assets_hkd(session, prices)
+        vs = rules.check_trade(session, prices, symbol=f_symbol, side=f_side,
+                               price=f_price, qty=f_qty, fee=f_fee,
+                               trade_dt=datetime.combine(f_date, datetime.min.time()),
+                               total_assets=total)
+        st.session_state["pending_txn"] = dict(
+            symbol=f_symbol, side=f_side, price=f_price, qty=f_qty,
+            fee=f_fee, dt=f_date, violations=vs)
+        if vs:
+            for v in vs:
+                st.warning(f"**{v['rule']}** — {v['message']}")
+        else:
+            st.success("十條規則全部過關")
+    p = st.session_state.get("pending_txn")
+    if p:
+        label = ("照錄唔改(override,違規記錄在案)" if p["violations"]
+                 else "確認錄入")
+        if st.button(label):
+            inst = (session.query(Instrument)
+                    .filter_by(symbol=p["symbol"]).first())
+            if not inst:
+                mkt = "HK" if p["symbol"].endswith(".HK") else "US"
+                inst = Instrument(symbol=p["symbol"], market=mkt,
+                                  ccy="HKD" if mkt == "HK" else "USD")
+                session.add(inst)
+                session.flush()
+            txn = Transaction(account_id=1, instrument_id=inst.id,
+                              trade_dt=datetime.combine(p["dt"], datetime.min.time()),
+                              type=p["side"], price=p["price"], qty=p["qty"],
+                              fee=p["fee"], ccy=inst.ccy, source="manual")
+            session.add(txn)
+            session.flush()
+            rules.record_violations(session, p["violations"], txn_id=txn.id)
+            session.commit()
+            rebuild_lots(session)
+            del st.session_state["pending_txn"]
+            st.success(f"已錄入並重算 FIFO:{p['side']} {p['symbol']} "
+                       f"{p['qty']:g} @ {p['price']}")
+            st.rerun()
+
+# ---- 行為儀表板(§6.6:業主獨有殺手功能) ----
+with tab5:
+    w = behavior.dual_track_win_rate(session, prices)
+    outs, cost = behavior.violation_outcomes(session, prices)
+    disp = behavior.disposition_stats(session, prices)
+
+    st.subheader("雙軌勝率 — 唔好再被 91.7% 呃自己")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("已實現勝率(倖存者偏差)", f"{w['realized_win_rate']:.1%}")
+    c2.metric("真實勝率(含 mark-to-market)",
+              f"{w['true_win_rate']:.1%}" if w["true_win_rate"] else "N/A",
+              delta=f"{(w['true_win_rate']-w['realized_win_rate'])*100:.1f} pp",
+              delta_color="inverse")
+    c3.metric("歷史違規成本 HKD", f"{cost:,.0f}")
+    st.caption(f"賺緊 {len(w['open_winners'])} 隻 / 蝕緊 {len(w['open_losers'])} 隻"
+               f"(open positions 計入分母先係真相)")
+
+    st.subheader("處置效應監測(贏快沽、蝕死揸)")
+    c1, c2 = st.columns(2)
+    if disp["avg_hold_win_days"] is not None:
+        c1.metric("贏回合平均持倉", f"{disp['avg_hold_win_days']:.0f} 日")
+        c2.metric("蝕回合平均持倉", f"{disp['avg_hold_loss_days']:.0f} 日")
+    if disp["open_loser_lots"]:
+        st.caption("蝕緊嘅 open lots(賬齡排序)— 真正嘅蝕貨全部匿喺度:")
+        st.dataframe(pd.DataFrame(disp["open_loser_lots"])
+                     .rename(columns={"symbol": "標的", "days": "揸咗(日)",
+                                      "unreal_hkd": "浮虧HKD"}),
+                     use_container_width=True, hide_index=True)
+
+    st.subheader("現時違規(狀態掃描)")
+    for v in rules.scan_portfolio(session, prices):
+        st.error(f"**{v['rule']}** — {v['message']}")
+
+    st.subheader("歷史違規回顧(含每單最終結果)")
+    if outs:
+        st.dataframe(pd.DataFrame([{"規則": o["rule"], "標的": o["symbol"],
+                                    "詳情": o["message"],
+                                    "最終結果HKD": o["outcome_hkd"]}
+                                   for o in outs]),
+                     use_container_width=True, hide_index=True)
+        st.caption("違規成本 = 所有負結果合計;「違咗規但好彩賺咗」唔會攞嚟溝淡。")
+
+# ---- 全資產(§6.6:Percento 式四區塊) ----
+with tab6:
+    nw = assets.net_worth(session, prices)
+    st.subheader("淨資產總覽")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("淨資產 HKD", f"{nw['net_worth_hkd']:,.0f}")
+    c2.metric("總資產 HKD", f"{nw['total_assets_hkd']:,.0f}")
+    c3.metric("股票市值(自動)", f"{nw['equity_mv_hkd']:,.0f}")
+    blocks = {k: v for k, v in nw["blocks"].items() if v}
+    if blocks:
+        st.bar_chart(pd.Series(blocks))
+    rows = assets.latest_assets(session)
+    if rows:
+        st.dataframe(pd.DataFrame(rows)
+                     .rename(columns={"block": "區塊", "category": "類別",
+                                      "name": "名稱", "ccy": "幣種",
+                                      "value": "原幣值", "value_hkd": "HKD",
+                                      "as_of": "更新日"}),
+                     use_container_width=True, hide_index=True)
+    st.subheader("手動記一項(月度輸入)")
+    with st.form("asset_form"):
+        c1, c2, c3 = st.columns(3)
+        a_cat = c1.selectbox("類別", assets.CATEGORIES)
+        a_name = c2.text_input("名稱(e.g. 滙豐往來 / 永明MPF)")
+        a_ccy = c3.selectbox("幣種", ["HKD", "USD"])
+        c4, c5 = st.columns(2)
+        a_val = c4.number_input("價值(原幣)", min_value=0.0, format="%.2f")
+        a_date = c5.date_input("估值日", value=date.today())
+        if st.form_submit_button("記低") and a_name:
+            assets.upsert_asset(session, a_cat, a_name, a_ccy, a_val, a_date)
+            st.rerun()
+
+# ---- 報表(§6.6:月度熱力圖 + 回撤曲線) ----
+with tab7:
+    st.subheader("月度已實現 + 股息(HKD)")
+    pivot = reports.monthly_pnl_pivot(session)
+    if not pivot.empty:
+        try:                                    # 熱力圖上色要 matplotlib
+            styled = (pivot.style.background_gradient(cmap="RdYlGn", axis=None)
+                      .format("{:,.0f}", na_rep="—"))
+            st.dataframe(styled, use_container_width=True)
+        except ImportError:
+            st.dataframe(pivot, use_container_width=True)
+        st.caption("口徑:已實現回合 + 股息現金(唔含未實現)— 同已平倉頁/收益頁完全對數。")
+    st.subheader("NAV 回撤曲線(snapshots)")
+    series = reports.nav_series(session)
+    if len(series) >= 2:
+        curve, max_dd = reports.drawdown_curve(series)
+        df = pd.DataFrame(curve, columns=["date", "nav", "dd"]).set_index("date")
+        st.line_chart(df["dd"])
+        st.caption(f"最大回撤:{max_dd:.1%}")
+    else:
+        st.info("要儲低 ≥2 日 snapshot 先畫到回撤曲線 — 側欄撳「寫入今日 snapshot」。")
+    with st.sidebar:
+        if st.button("寫入今日 snapshot"):
+            try:
+                nav, _ = build_snapshot(session, date.today(), prices)
+                st.success(f"NAV HKD {nav:,.0f} 已寫入")
+            except ValueError as e:
+                st.error(str(e))

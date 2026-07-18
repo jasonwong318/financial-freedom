@@ -12,6 +12,7 @@ from datetime import datetime
 import csv
 
 from .models import Account, Instrument, Transaction
+from .config import SECTOR_MAP
 
 TYPE_MAP = {"Buy": "BUY", "Sell": "SELL", "DividendCash": "DIV_CASH"}
 
@@ -49,7 +50,8 @@ def import_stockerx_csv(session, path: str, account_name: str = "主戶口") -> 
             if not inst:
                 asset_class = "etf" if symbol in ("VOO", "7500.HK", "2802.HK", "3416.HK", "3466.HK") else "equity"
                 inst = Instrument(symbol=symbol, name=name, market=market,
-                                  ccy=ccy, asset_class=asset_class)
+                                  ccy=ccy, asset_class=asset_class,
+                                  sector=SECTOR_MAP.get(symbol))
                 session.add(inst)
                 session.flush()
             inst_cache[key] = inst
