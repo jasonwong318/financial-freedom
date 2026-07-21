@@ -16,12 +16,13 @@ import pandas as pd
 from app.models import make_session, Transaction, Instrument, RuleViolation, Rule
 from app.importer import import_stockerx_csv
 from app.fifo import rebuild_lots
-from app import metrics, rules, behavior, assets, reports
+from app import metrics, rules, behavior, assets, reports, income, benchmark, fx, advisor
 from app.prices import YFinanceProvider, ManualPriceProvider, store_eod, latest_prices
-from app.performance import portfolio_xirr, build_snapshot
+from app.performance import portfolio_xirr, build_snapshot, twrr
+from app import config
 from app.config import to_hkd
 
-DB_URL = "sqlite:///portfolio.db"
+DB_URL = os.environ.get("PORTFOLIO_DB_URL", "sqlite:///portfolio.db")
 CSV_DEFAULT = os.path.join(os.path.dirname(__file__), "..", "tests", "data",
                            "Stock-20260711.csv")
 
@@ -40,9 +41,9 @@ def get_session():
 
 session = get_session()
 st.title("Portfolio System")
-st.caption("lot-level 口徑 · 匯率 7.80(固定) · 取代 StockerX")
+st.caption(f"lot-level 口徑 · {config.fx_note()} · 取代 StockerX")
 
-# ---- 側欄:攞價 ----
+# ---- 側欄:攞價 + 匯率口徑 ----
 with st.sidebar:
     st.header("價格更新")
     if st.button("yfinance 攞最新 EOD"):
@@ -50,6 +51,28 @@ with st.sidebar:
         got = YFinanceProvider().get_eod(list(pos), date.today())
         n = store_eod(session, date.today(), got)
         st.success(f"更新咗 {n} 隻")
+
+    st.header("匯率口徑(§2)")
+    mode = st.radio("USDHKD 模式", ["固定 7.80", "歷史(fx_rates)"],
+                    index=0 if config.FX_MODE == "fixed" else 1)
+    if mode.startswith("固定"):
+        fx.use_fixed()
+    else:
+        try:
+            fx.load_rates(session)
+        except ValueError:
+            if st.button("backfill USDHKD=X(yfinance)"):
+                from app.benchmark import YFinanceBenchmarkProvider
+
+                class _P:                       # 包成 fx provider 介面
+                    def series(self, t, s, e):
+                        return YFinanceBenchmarkProvider().series(t, s, e)
+                fx.backfill_usdhkd(session, date(2019, 1, 1), date.today(), _P())
+                fx.load_rates(session)
+                st.rerun()
+            st.info("未有歷史匯率數據,撳上面 backfill")
+    st.caption(config.fx_note())
+
     prices = latest_prices(session)
     missing = [s for s in metrics.open_positions(session) if s not in prices]
     if missing:
@@ -59,8 +82,9 @@ with st.sidebar:
             if v > 0:
                 prices[sym] = v
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-    ["總覽", "持倉", "已平倉", "新增交易", "行為儀表板", "全資產", "報表"])
+tab1, tab_inc, tab2, tab3, tab4, tab5, tab6, tab7, tab_ai = st.tabs(
+    ["總覽", "收益", "持倉", "已平倉", "新增交易", "行為儀表板",
+     "全資產", "報表", "AI顧問"])
 
 # ---- 總覽(§6.1) ----
 with tab1:
@@ -88,6 +112,63 @@ with tab1:
     if len(breach):
         st.error("超標:" + ", ".join(f"{s} {v:.1%}" for s, v in breach.items()))
     st.bar_chart(w)
+
+# ---- 收益(§6.2:三組成分開 + 分母口徑註明 + 股息 + yield-on-cost) ----
+with tab_inc:
+    basis = st.radio("收益 % 分母口徑", ["open_cost", "total_in"],
+                     format_func=lambda b: "現時持倉成本" if b == "open_cost"
+                     else "歷史總投入(累計買入)", horizontal=True)
+    inc = income.income_summary(session, prices, basis=basis)
+    st.caption(f"分母:{inc['denom_label']} = HKD {inc['denom_hkd']:,.0f} · {config.fx_note()}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("持倉收益(價差)", f"{inc['holding_unreal_hkd']:+,.0f}",
+              f"{inc['holding_unreal_pct']*100:.1f}%" if inc["holding_unreal_pct"] else None)
+    c2.metric("已實現", f"{inc['realized_hkd']:+,.0f}",
+              f"{inc['realized_pct']*100:.1f}%" if inc["realized_pct"] else None)
+    c3.metric("股息", f"{inc['dividends_hkd']:+,.0f}",
+              f"{inc['dividends_pct']*100:.1f}%" if inc["dividends_pct"] else None)
+    try:
+        r = portfolio_xirr(session, date.today(), prices)
+        c4.metric("XIRR 年化(StockerX 冇)", f"{r*100:.2f}%" if r is not None else "N/A")
+    except ValueError:
+        c4.metric("XIRR 年化", "欠價")
+    st.caption(f"含息總回報(參考)= {inc['total_return_hkd']:+,.0f} — "
+               "三組成永遠分開,唔會擠埋做一個誤導綠色數字。")
+
+    st.subheader("每持倉三口徑回報(§5)")
+    prows = []
+    for sym, r in income.position_returns(session, prices).items():
+        prows.append({
+            "標的": sym, "成本HKD": round(r["cost_hkd"]),
+            "①價差未實現": round(r["price_only_unreal_hkd"]) if r["price_only_unreal_hkd"] is not None else None,
+            "②含息未實現": round(r["with_div_unreal_hkd"]) if r["with_div_unreal_hkd"] is not None else None,
+            "持有期股息": round(r["held_div_hkd"]),
+            "③yield-on-cost": f"{r['yield_on_cost']*100:.1f}%" if r["yield_on_cost"] else "—",
+        })
+    st.dataframe(pd.DataFrame(prows).sort_values("②含息未實現",
+                 ascending=False, na_position="last"),
+                 use_container_width=True, hide_index=True)
+    st.caption("收息倉排序用「②含息未實現」— 業主鐵律:評估收息股一律含息總回報。")
+
+    st.subheader("月度股息(HKD)")
+    md = income.monthly_dividends(session)
+    if md:
+        mdf = pd.DataFrame([{"月份": f"{y}-{m:02d}", "股息HKD": round(v)}
+                            for (y, m), v in sorted(md.items())]).set_index("月份")
+        st.bar_chart(mdf)
+
+    st.subheader("收益 vs 基準(total return 口徑,§5)")
+    picks = st.multiselect("基準", list(benchmark.BENCHMARKS),
+                           default=["VOO", "^HSI"],
+                           format_func=lambda t: f"{t} {benchmark.BENCHMARKS[t]['name']}")
+    if st.button("攞基準(yfinance,近一年)") and picks:
+        prov = benchmark.YFinanceBenchmarkProvider()
+        cmp = benchmark.compare(prov, picks, date(date.today().year - 1,
+                                date.today().month, date.today().day), date.today(),
+                                portfolio_twrr=twrr(session))
+        st.dataframe(pd.DataFrame([{"基準": v["name"],
+                     "區間總回報": f"{v['total_return']*100:.1f}%" if v["total_return"] is not None else "—"}
+                     for v in cmp.values()]), use_container_width=True, hide_index=True)
 
 # ---- 持倉(§6.3:雙軌口徑分兩欄) ----
 with tab2:
@@ -226,6 +307,25 @@ with tab6:
     blocks = {k: v for k, v in nw["blocks"].items() if v}
     if blocks:
         st.bar_chart(pd.Series(blocks))
+
+    # Treemap:持倉市值矩形樹狀圖(§6.6,Percento 借鏡)
+    st.subheader("持倉 Treemap(市值權重)")
+    upl_a = metrics.open_position_pnl(session, prices)
+    tm = [{"標的": s, "市值HKD": v["mv_hkd"],
+           "板塊": (session.query(Instrument).filter_by(symbol=s).first().sector
+                   or "未分類")}
+          for s, v in upl_a.items() if v and v["mv_hkd"] > 0]
+    if tm:
+        try:
+            import plotly.express as px_
+            fig = px_.treemap(pd.DataFrame(tm), path=["板塊", "標的"],
+                              values="市值HKD",
+                              title="市值集中度(顏色深 = 權重大)")
+            st.plotly_chart(fig, use_container_width=True)
+        except ImportError:
+            st.dataframe(pd.DataFrame(tm).sort_values("市值HKD", ascending=False),
+                         use_container_width=True, hide_index=True)
+
     rows = assets.latest_assets(session)
     if rows:
         st.dataframe(pd.DataFrame(rows)
@@ -275,3 +375,20 @@ with tab7:
                 st.success(f"NAV HKD {nav:,.0f} 已寫入")
             except ValueError as e:
                 st.error(str(e))
+
+# ---- AI 顧問(§7 /advisor:組合快照 → Claude,掛免責) ----
+with tab_ai:
+    st.subheader("AI 顧問(組合快照分析)")
+    st.caption("只餵事實快照(持倉/勝率/違規/集中度)俾 Claude,唔預測股價。"
+               "未設定 ANTHROPIC_API_KEY 會回離線快照。")
+    q = st.text_area("問題", value="根據我嘅組合快照,最需要注意嘅行為風險係乜?")
+    if st.button("問 AI 顧問"):
+        with st.spinner("分析緊…"):
+            res = advisor.ask(session, prices, q)
+        if res["offline"]:
+            st.info("離線模式(未設定 API key)— 以下係餵入嘅事實快照:")
+            st.json(res["context"])
+        else:
+            st.markdown(res["answer"])
+    with st.expander("預覽會餵入嘅組合快照(純事實,無預測)"):
+        st.json(advisor.build_snapshot_context(session, prices))

@@ -10,6 +10,7 @@ from datetime import datetime
 from sqlalchemy import (Column, Integer, Text, Numeric, TIMESTAMP, Date,
                         Boolean, ForeignKey, CheckConstraint, UniqueConstraint,
                         create_engine, JSON)
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
@@ -137,7 +138,20 @@ class RuleViolation(Base):
 
 
 def make_session(url: str = "sqlite:///:memory:"):
-    """開發用 SQLite;正式版換 postgresql:// URL 即可。"""
-    engine = create_engine(url)
+    """開發用 SQLite;正式版換 postgresql:// URL 即可。
+
+    SQLite 配 FastAPI:worker thread 會喺其他執行緒用 session,所以要
+    check_same_thread=False;:memory: 更要 StaticPool 全程共享同一連線,
+    否則每個連線各自一個空 DB。Postgres URL 唔受呢啲影響。
+    """
+    if url.startswith("sqlite"):
+        connect_args = {"check_same_thread": False}
+        if ":memory:" in url:
+            engine = create_engine(url, connect_args=connect_args,
+                                   poolclass=StaticPool)
+        else:
+            engine = create_engine(url, connect_args=connect_args)
+    else:
+        engine = create_engine(url)
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)()

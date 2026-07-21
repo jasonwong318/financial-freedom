@@ -1,0 +1,44 @@
+# 本地優先部署(規格書 §1):db + api + ui 三個 service。
+# 私隱優先,唔上雲。跑法:docker compose up --build
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: portfolio
+      POSTGRES_PASSWORD: portfolio
+      POSTGRES_DB: portfolio
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portfolio"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    environment:
+      # SQLAlchemy 抽象:呢度指去 Postgres;開發想用 SQLite 就改成 sqlite:///portfolio.db
+      PORTFOLIO_DB_URL: postgresql+psycopg2://portfolio:portfolio@db:5432/portfolio
+      # AI 顧問(選用):喺 .env 放 ANTHROPIC_API_KEY,冇就離線降級
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+  ui:
+    build: .
+    environment:
+      PORTFOLIO_DB_URL: postgresql+psycopg2://portfolio:portfolio@db:5432/portfolio
+    depends_on:
+      - api
+    ports:
+      - "8501:8501"
+    command: streamlit run ui/app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+
+volumes:
+  pgdata:
