@@ -43,8 +43,39 @@ session = get_session()
 st.title("Portfolio System")
 st.caption(f"lot-level 口徑 · {config.fx_note()} · 取代 StockerX")
 
-# ---- 側欄:攞價 + 匯率口徑 ----
+# ---- 側欄:匯入 CSV + 攞價 + 匯率口徑 ----
 with st.sidebar:
+    st.header("匯入交易 CSV")
+    up = st.file_uploader("StockerX 匯出格式(.csv)", type="csv")
+    st.caption("每次由券商匯出一份完整 CSV,撳下面「清空並重新匯入」就更新晒。")
+    if up is not None and st.button("清空並重新匯入", type="primary"):
+        import tempfile
+        from app.models import Lot, LotClosure
+        with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as tmp:
+            tmp.write(up.getvalue())
+            tmp_path = tmp.name
+        try:
+            session.query(LotClosure).delete()
+            session.query(Lot).delete()
+            session.query(Transaction).delete()
+            session.commit()
+            report = import_stockerx_csv(session, tmp_path)
+            rebuild_lots(session)
+        finally:
+            os.unlink(tmp_path)
+        msg = f"匯入 {report.imported} 筆"
+        if report.rejected:
+            msg += f",擋咗 {len(report.rejected)} 筆壞行"
+        st.success(msg + " ✓ 已重算 FIFO")
+        if report.rejected:
+            with st.expander(f"驗證報告:{len(report.rejected)} 筆被擋(唔入庫)"):
+                st.dataframe(pd.DataFrame(
+                    [{"行號": r[0], "原因": r[1],
+                      "代號": r[2].get("Stock Symbol"),
+                      "日期": r[2].get("Trade Date")} for r in report.rejected]),
+                    use_container_width=True, hide_index=True)
+        st.rerun()
+
     st.header("價格更新")
     if st.button("yfinance 攞最新 EOD"):
         pos = metrics.open_positions(session)
