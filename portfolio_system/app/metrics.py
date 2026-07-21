@@ -27,12 +27,22 @@ def round_trips(session):
         key = cl.close_txn_id
         a = agg.setdefault(key, {"symbol": inst.symbol, "ccy": inst.ccy,
                                  "sell_dt": sell.trade_dt,
-                                 "pnl_ccy": Decimal(0), "hold_days": 0})
+                                 "sell_price": float(sell.price),
+                                 "pnl_ccy": Decimal(0), "hold_days": 0,
+                                 "qty": Decimal(0), "_cost": Decimal(0),
+                                 "buy_dt": lot.open_dt})
         a["pnl_ccy"] += Decimal(cl.realized_pnl_ccy)
         a["hold_days"] = max(a["hold_days"], cl.hold_days)
+        a["qty"] += Decimal(cl.qty)
+        a["_cost"] += Decimal(cl.qty) * Decimal(lot.open_price)   # 加權買入均價用
+        if lot.open_dt < a["buy_dt"]:
+            a["buy_dt"] = lot.open_dt                              # 最早開倉日
     out = []
     for a in agg.values():
         a["pnl_hkd"] = to_hkd(float(a["pnl_ccy"]), a["ccy"])
+        a["avg_buy_price"] = float(a["_cost"] / a["qty"]) if a["qty"] else 0.0
+        a["qty"] = float(a["qty"])
+        del a["_cost"]
         out.append(a)
     out.sort(key=lambda x: x["sell_dt"])
     return out

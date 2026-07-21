@@ -219,6 +219,66 @@ def _register_altair_theme():
         pass
 
 
+def stat(container, label, value, sub=None, tone="neutral"):
+    """彩色 stat 卡(HTML)—— tone: pos(綠)/neg(紅)/neutral(白)。
+
+    st.metric 無法按數值正負上色,所以損益類數字改用呢個自繪卡片。
+    tone 亦可傳 "auto:<number>":自動按正負決定顏色。
+    """
+    if isinstance(tone, str) and tone.startswith("auto:"):
+        try:
+            n = float(tone.split(":", 1)[1])
+            tone = "pos" if n > 0 else "neg" if n < 0 else "neutral"
+        except ValueError:
+            tone = "neutral"
+    color = {"pos": POS, "neg": NEG, "neutral": INK}.get(tone, INK)
+    sub_html = (f'<div style="font-size:.72rem;color:{INK_SUBTLE};margin-top:2px">'
+                f'{sub}</div>') if sub else ""
+    # HTML 必須頂格單行:Streamlit markdown 會把縮排 HTML 當 code block,漏出 </div>
+    html = (
+        f'<div style="background:{SURFACE_1};border:1px solid {HAIRLINE};'
+        f'border-radius:8px;padding:12px 14px;">'
+        f'<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;'
+        f'color:{INK_SUBTLE};font-weight:500;margin-bottom:4px;">{label}</div>'
+        f'<div style="font-size:1.5rem;font-weight:600;letter-spacing:-.02em;'
+        f'font-variant-numeric:tabular-nums;color:{color};">{value}</div>'
+        f'{sub_html}</div>')
+    container.markdown(html, unsafe_allow_html=True)
+
+
+def donut(pairs, hole=0.55, breach=None):
+    """甜甜圈圖(規格書 §6.1)。pairs = [(label, value), ...]。
+
+    breach:> 呢個比例(如 0.15)嘅扇區用紅色標示(15% 集中度上限)。
+    回傳 plotly fig(已套暗色);冇 plotly 就回 None。
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return None
+    labels = [p[0] for p in pairs]
+    values = [p[1] for p in pairs]
+    total = sum(values) or 1
+    palette = [ACCENT, "#7a7fad", POS, AMBER, "#5b8def", "#9b8cff",
+               INK_SUBTLE, "#6b7280"]
+    colors = []
+    for i, v in enumerate(values):
+        if breach is not None and v / total > breach:
+            colors.append(NEG)                       # 超標扇區紅色
+        else:
+            colors.append(palette[i % len(palette)])
+    fig = go.Figure(go.Pie(
+        labels=labels, values=values, hole=hole, sort=True, direction="clockwise",
+        marker=dict(colors=colors, line=dict(color=CANVAS, width=1.5)),
+        textinfo="label+percent", textfont=dict(size=11, color=INK),
+        hovertemplate="%{label}: HKD %{value:,.0f} (%{percent})<extra></extra>"))
+    fig.update_layout(
+        paper_bgcolor=CANVAS, plot_bgcolor=CANVAS, showlegend=False,
+        font=dict(color=INK, family="Inter"), margin=dict(t=10, l=10, r=10, b=10),
+        height=340)
+    return fig
+
+
 def color_pnl(df, cols):
     """回傳 pandas Styler:指定損益欄正數綠、負數紅(克制色),右對齊 tabular。
 

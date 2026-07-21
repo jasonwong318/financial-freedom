@@ -54,12 +54,23 @@ def disposition_stats(session, prices, on_date=None):
     lots = (session.query(Lot, Instrument)
             .join(Instrument, Lot.instrument_id == Instrument.id)
             .filter(Lot.qty_remaining > 0).all())
+    # 逐 lot(蝕緊嘅)明細:買入日、買入價、股數、按現價計嘅該 lot 浮虧
     for lot, inst in lots:
         v = upl.get(inst.symbol)
-        if v and v["unreal_hkd"] <= 0:
-            loser_ages.append({"symbol": inst.symbol,
-                               "days": (ref_dt - lot.open_dt).days,
-                               "unreal_hkd": round(v["unreal_hkd"])})
+        px = prices.get(inst.symbol)
+        if not (v and v["unreal_hkd"] <= 0) or px is None:
+            continue
+        open_px = float(lot.open_price)
+        qty = float(lot.qty_remaining)
+        lot_unreal = to_hkd((px - open_px) * qty, inst.ccy)
+        loser_ages.append({
+            "symbol": inst.symbol,
+            "buy_date": lot.open_dt.date(),
+            "buy_price": open_px,
+            "shares": qty,
+            "days": (ref_dt - lot.open_dt).days,
+            "unreal_hkd": round(lot_unreal),
+        })
     return {
         "avg_hold_win_days": sum(win_holds) / len(win_holds) if win_holds else None,
         "avg_hold_loss_days": sum(loss_holds) / len(loss_holds) if loss_holds else None,

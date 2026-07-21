@@ -41,6 +41,26 @@ SECTOR_MAP = {
     "3416.HK": "高息收租", "3466.HK": "高息收租", "0823.HK": "高息收租",
 }
 
+# 中文簡稱(UI 顯示用;唔影響任何計算)。查唔到就 fallback 去 instrument.name / symbol。
+NAME_MAP = {
+    "0001.HK": "長和", "0011.HK": "恒生銀行", "0175.HK": "吉利汽車",
+    "0823.HK": "領展", "0883.HK": "中海油", "0941.HK": "中移動",
+    "0981.HK": "中芯國際", "1725.HK": "USPACE", "3466.HK": "恒生高股息",
+    "3896.HK": "金山雲", "9880.HK": "優必選", "9888.HK": "百度",
+    "9988.HK": "阿里巴巴", "7500.HK": "南方恒指", "3416.HK": "高息ETF",
+    "2802.HK": "高息ETF",
+    "TSLA": "Tesla", "NVDA": "輝達", "MU": "美光", "MRVL": "Marvell",
+    "LITE": "Lumentum", "NVTS": "Navitas", "GME": "GameStop",
+    "GOOGL": "Google", "VOO": "標普500", "XYZ": "Block", "SPCX": "SpaceX",
+    "RGTI": "Rigetti", "CRWV": "CoreWeave", "VSCO": "維密",
+}
+
+
+def short_name(symbol: str, fallback: str = None) -> str:
+    """回中文簡稱;冇就用傳入嘅英文名,再冇就用 symbol 本身。"""
+    return NAME_MAP.get(symbol) or fallback or symbol
+
+
 def to_hkd(amount: float, ccy: str, on_date=None) -> float:
     """原幣金額折算 HKD。on_date 傳咗且 historical 模式就用 as-of 匯率。"""
     if ccy == "HKD":

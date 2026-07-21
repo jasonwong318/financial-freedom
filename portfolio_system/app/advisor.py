@@ -55,18 +55,30 @@ def build_snapshot_context(session, prices: dict) -> dict:
     }
 
 
-def ask(session, prices: dict, question: str, *, model="claude-opus-4-8",
-        max_tokens=1024) -> dict:
+def ask(session, prices: dict, question: str, *, model=None, api_key=None,
+        base_url=None, max_tokens=1024) -> dict:
     """問 AI 顧問。回傳 {answer, offline, context}。
 
-    冇 ANTHROPIC_API_KEY / 冇 anthropic SDK → offline 模式,回快照 + 提示點開通。
+    支援兩種後端(都行 Anthropic Messages 協議):
+      1. Anthropic 官方 —— 唔傳 base_url,model 預設 claude-opus-4-8
+      2. 火山引擎方舟(ark)—— base_url = https://ark.cn-beijing.volces.com/api/plan,
+         model = ark-code-latest,api_key = 你嘅火山 API Key
+
+    參數優先於環境變數:
+      api_key   ← ANTHROPIC_API_KEY / ARK_API_KEY
+      base_url  ← ANTHROPIC_BASE_URL(設咗即用兼容端點)
+      model     ← ADVISOR_MODEL(預設 claude-opus-4-8)
+    冇 key / 冇 SDK → offline 模式,回事實快照,唔爆。
     """
     context = build_snapshot_context(session, prices)
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ARK_API_KEY")
+    base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL")
+    model = model or os.environ.get("ADVISOR_MODEL") or "claude-opus-4-8"
+
     if not api_key:
         return {"offline": True, "context": context,
-                "answer": ("(離線模式:未設定 ANTHROPIC_API_KEY)\n"
-                           "以下係你嘅組合事實快照,設定 API key 後可問 AI 分析:\n"
+                "answer": ("(離線模式:未設定 API Key)\n"
+                           "以下係你嘅組合事實快照,設定 Key 後可問 AI 分析:\n"
                            + json.dumps(context, ensure_ascii=False, indent=2)
                            + "\n\n" + DISCLAIMER)}
     try:
@@ -75,13 +87,21 @@ def ask(session, prices: dict, question: str, *, model="claude-opus-4-8",
         return {"offline": True, "context": context,
                 "answer": "(未安裝 anthropic SDK:pip install anthropic)\n" + DISCLAIMER}
 
-    client = anthropic.Anthropic(api_key=api_key)
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url          # 火山方舟 / 其他 Anthropic 兼容端點
+    client = anthropic.Anthropic(**kwargs)
     user_msg = (f"組合快照(JSON):\n{json.dumps(context, ensure_ascii=False, indent=2)}\n\n"
                 f"用戶問題:{question}")
-    resp = client.messages.create(
-        model=model, max_tokens=max_tokens, system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_msg}])
+    try:
+        resp = client.messages.create(
+            model=model, max_tokens=max_tokens, system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}])
+    except Exception as e:                       # 網路/鑑權/模型名錯 → 唔好成頁冧
+        return {"offline": True, "context": context,
+                "answer": f"(呼叫 AI 失敗:{type(e).__name__}: {e})\n\n" + DISCLAIMER}
     answer = "".join(b.text for b in resp.content if hasattr(b, "text"))
     if DISCLAIMER not in answer:
         answer = answer.rstrip() + "\n\n" + DISCLAIMER
-    return {"offline": False, "context": context, "answer": answer}
+    return {"offline": False, "context": context, "answer": answer,
+            "model": model, "endpoint": base_url or "anthropic"}

@@ -78,6 +78,19 @@ docker compose up --build            # UI:8501 · API:8000 · Postgres:5432
 - 無漸變 / 無玻璃 / 無霓虹。主題**純外觀**:唔改任何功能、文案或數字口徑。
 - 換風格淨係改 `ui/theme.py` 頂部嘅 design tokens(色 / 字距)即可,唔使掂業務碼。
 
+## UI v2(業主反饋第一版)
+- 總覽:指標改名(持倉收益/虧損 · 已實現收益/虧損 · 股息分開)+ 損益紅綠色碼 +
+  甜甜圈佔比圖(超 15% 扇區紅色)+ 旁邊權重列表
+- 標的加中文簡稱(`config.NAME_MAP` / `short_name()`),收益/持倉/已平倉/行為頁通用
+- 已平倉加:買入日 / 買入均價 / 沽出價 / 股數(`round_trips` 加對應欄位)
+- 收益頁加:股數 / 現價
+- 新增交易頁:可展開睇「十條行為規則」現行參數
+- 行為儀表板:蝕貨按標的分組,展開睇每批幾時買 / 幾錢買 / 揸幾耐 / 浮虧
+- AI 顧問:支援**火山引擎方舟(ark)**——`advisor.ask()` 接受 base_url/model/api_key;
+  UI 內可揀供應商、填 Base URL(`https://ark.cn-beijing.volces.com/api/plan`)+
+  模型(`ark-code-latest`)+ Key,或用環境變數 ANTHROPIC_BASE_URL / ADVISOR_MODEL
+- 測試 47 → 52 條全綠
+
 ## 里程碑狀態
 Sprint 1-4 全部交付完成。SPEC §9 四個 sprint 已行完;§10 scope 外項目(實時串流、
 自動落單、沽空/期權、多用戶)按約唔做。

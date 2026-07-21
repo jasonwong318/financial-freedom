@@ -135,24 +135,38 @@ with tab1:
     unreal = sum(v["unreal_hkd"] for v in upl.values() if v)
     divs = metrics.dividends_by_symbol(session)
     rs = metrics.realized_summary(session)
+    realized = rs.get("total_realized_hkd", 0.0)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("總市值 HKD", f"{mv:,.0f}")
-    c2.metric("未實現(價差)", f"{unreal:+,.0f}")
-    c3.metric("已實現 + 股息", f"{rs['total_realized_hkd'] + divs['_total']:+,.0f}")
+    # 五格:總市值 / 持倉損益 / 已實現損益 / 股息 / XIRR —— 損益紅綠色碼
+    c1, c2, c3, c4, c5 = st.columns(5)
+    theme.stat(c1, "總市值 HKD", f"{mv:,.0f}")
+    theme.stat(c2, "持倉收益/虧損", f"{unreal:+,.0f}", tone=f"auto:{unreal}")
+    theme.stat(c3, "已實現收益/虧損", f"{realized:+,.0f}", tone=f"auto:{realized}")
+    theme.stat(c4, "股息(全歷史)", f"{divs['_total']:+,.0f}", tone="pos")
     if have_all:
         r = portfolio_xirr(session, date.today(), prices)
-        c4.metric("XIRR 年化", f"{r*100:.2f}%" if r is not None else "N/A")
+        theme.stat(c5, "XIRR 年化", f"{r*100:.2f}%" if r is not None else "N/A",
+                   tone=("auto:1" if (r or 0) > 0 else "auto:-1"))
     else:
-        c4.metric("XIRR 年化", "欠價")
+        theme.stat(c5, "XIRR 年化", "欠價", tone="neutral")
 
-    # 集中度(規格書:15% 上限線)
-    w = pd.Series({s: v["mv_hkd"] for s, v in upl.items() if v}).sort_values(ascending=False) / mv
-    st.subheader("持倉權重(紅線 = 15% 單一標的上限)")
-    breach = w[w > 0.15]
+    # 集中度甜甜圈(§6.1:15% 單一標的上限,超標扇區紅色)
+    wser = pd.Series({s: v["mv_hkd"] for s, v in upl.items() if v}).sort_values(ascending=False)
+    st.subheader("持倉市值佔比(紅色扇區 = 超 15% 單一標的上限)")
+    breach = (wser / mv)[wser / mv > 0.15]
     if len(breach):
-        st.error("超標:" + ", ".join(f"{s} {v:.1%}" for s, v in breach.items()))
-    st.bar_chart(w)
+        st.error("集中度超標:" + ", ".join(
+            f"{config.short_name(s)} {v:.1%}" for s, v in breach.items()))
+    colL, colR = st.columns([3, 2])
+    fig = theme.donut([(config.short_name(s), float(v)) for s, v in wser.items()],
+                      breach=0.15)
+    if fig is not None:
+        colL.plotly_chart(fig, use_container_width=True)
+    # 權重列表(旁邊)
+    colR.dataframe(pd.DataFrame(
+        [{"標的": config.short_name(s), "代號": s, "佔比": f"{v/mv:.1%}"}
+         for s, v in wser.items()]),
+        use_container_width=True, hide_index=True, height=340)
 
 # ---- 收益(§6.2:三組成分開 + 分母口徑註明 + 股息 + yield-on-cost) ----
 with tab_inc:
@@ -180,7 +194,9 @@ with tab_inc:
     prows = []
     for sym, r in income.position_returns(session, prices).items():
         prows.append({
-            "標的": sym, "成本HKD": round(r["cost_hkd"]),
+            "簡稱": config.short_name(sym), "代號": sym,
+            "股數": r["shares"], "現價": prices.get(sym),
+            "成本HKD": round(r["cost_hkd"]),
             "①價差未實現": round(r["price_only_unreal_hkd"]) if r["price_only_unreal_hkd"] is not None else None,
             "②含息未實現": round(r["with_div_unreal_hkd"]) if r["with_div_unreal_hkd"] is not None else None,
             "持有期股息": round(r["held_div_hkd"]),
@@ -220,8 +236,9 @@ with tab2:
     for sym, p in pos.items():
         u = upl.get(sym)
         rows.append({
-            "標的": sym, "股數": p["shares"], "平均成本(只計現有lot)": round(p["avg_cost"], 3),
-            "現價": prices.get(sym),
+            "簡稱": config.short_name(sym), "代號": sym, "股數": p["shares"],
+            "平均成本": round(p["avg_cost"], 3), "現價": prices.get(sym),
+            "市值HKD": round(u["mv_hkd"]) if u else None,
             "現時持倉收益HKD": round(u["unreal_hkd"]) if u else None,
             "lifetime已實現HKD": round(tr[sym]["realized_hkd"]),
             "累計股息HKD": round(tr[sym]["dividends_hkd"]),
@@ -231,22 +248,44 @@ with tab2:
     st.dataframe(theme.color_pnl(df, ["現時持倉收益HKD", "lifetime已實現HKD",
                                       "累計股息HKD"]),
                  use_container_width=True, hide_index=True)
-    st.caption("StockerX 會將三欄加埋做一個誤導數字;本系統永遠分開。")
+    st.caption("平均成本只計現有 lot(賣清歸零)· StockerX 會將三欄加埋做一個誤導數字,本系統永遠分開。")
 
 # ---- 已平倉(§6.4) ----
 with tab3:
     rts = metrics.round_trips(session)
-    df = pd.DataFrame([{"標的": r["symbol"], "平倉日": r["sell_dt"].date(),
-                        "持有日數": r["hold_days"],
+    df = pd.DataFrame([{"簡稱": config.short_name(r["symbol"]), "代號": r["symbol"],
+                        "買入日": r["buy_dt"].date(), "買入均價": round(r["avg_buy_price"], 3),
+                        "沽出日": r["sell_dt"].date(), "沽出價": round(r["sell_price"], 3),
+                        "股數": r["qty"], "持有日數": r["hold_days"],
                         "已實現HKD": round(r["pnl_hkd"])} for r in rts])
-    st.dataframe(theme.color_pnl(df.sort_values("平倉日", ascending=False),
+    st.dataframe(theme.color_pnl(df.sort_values("沽出日", ascending=False),
                                  ["已實現HKD"]),
                  use_container_width=True, hide_index=True)
     st.caption(f"共 {rs['rounds']} 回合 · 勝率 {rs['win_rate']:.1%} · "
                f"賺賠比 {rs['pl_ratio']:.2f} · 期望值 {rs['expectancy_hkd']:,.0f}/回合")
 
 # ---- 新增交易(§6.5:提交前跑規則引擎,violations 彈警示卡,可 override) ----
+RULE_DESC = {
+    "MAX_POSITION_WEIGHT": "單一標的市值佔比上限",
+    "MAX_SECTOR_WEIGHT": "板塊合計市值佔比上限",
+    "MAX_SINGLE_ENTRY": "單筆買入佔總資產上限",
+    "AVG_DOWN_LIMIT": "溝貨紀律(次數/跌幅/注碼)",
+    "CHASE_HIGH": "買價貼近 20 日高位",
+    "STALE_LOSER": "蝕住又揸太耐,強制檢討",
+    "STOP_LOSS_ALERT": "浮虧穿止蝕線提示",
+    "WEEKLY_CIRCUIT_BREAKER": "一週虧損超標,建議停手",
+    "FEE_CHECK": "預期毛利不足來回手續費倍數",
+    "REBUY_HIGHER": "沽出後短期高追返",
+}
 with tab4:
+    with st.expander("十條行為規則(現行參數)", expanded=False):
+        rrows = []
+        for r in session.query(Rule).order_by(Rule.code).all():
+            rrows.append({"規則": r.code, "說明": RULE_DESC.get(r.code, ""),
+                          "參數": str(r.params), "啟用": "✓" if r.enabled else "✗"})
+        st.dataframe(pd.DataFrame(rrows), use_container_width=True, hide_index=True)
+        st.caption("錄入交易時會自動全部過一次;違規彈警示卡但可 override(記錄在案)。")
+
     st.subheader("新增交易(提交前自動過十條行為規則)")
     with st.form("new_txn"):
         c1, c2, c3 = st.columns(3)
@@ -322,11 +361,27 @@ with tab5:
         c1.metric("贏回合平均持倉", f"{disp['avg_hold_win_days']:.0f} 日")
         c2.metric("蝕回合平均持倉", f"{disp['avg_hold_loss_days']:.0f} 日")
     if disp["open_loser_lots"]:
-        st.caption("蝕緊嘅 open lots(賬齡排序)— 真正嘅蝕貨全部匿喺度:")
-        _ldf = pd.DataFrame(disp["open_loser_lots"]).rename(
-            columns={"symbol": "標的", "days": "揸咗(日)", "unreal_hkd": "浮虧HKD"})
-        st.dataframe(theme.color_pnl(_ldf, ["浮虧HKD"]),
-                     use_container_width=True, hide_index=True)
+        st.caption("蝕緊嘅持倉 —— 預設按標的合計,展開睇每批幾時買、幾錢買:")
+        # 按標的 group,click expander 先 break 開逐批
+        by_sym = {}
+        for lot in disp["open_loser_lots"]:
+            by_sym.setdefault(lot["symbol"], []).append(lot)
+        # group 層排序:總浮虧最深行先
+        groups = sorted(by_sym.items(),
+                        key=lambda kv: sum(l["unreal_hkd"] for l in kv[1]))
+        for sym, lots in groups:
+            tot = sum(l["unreal_hkd"] for l in lots)
+            oldest = max(l["days"] for l in lots)
+            head = (f"{config.short_name(sym)}（{sym}）· {len(lots)} 批 · "
+                    f"浮虧 HKD {tot:,.0f} · 最耐揸 {oldest} 日")
+            with st.expander(head, expanded=False):
+                _ldf = pd.DataFrame([{
+                    "買入日": l["buy_date"], "買入價": round(l["buy_price"], 3),
+                    "股數": l["shares"], "揸咗(日)": l["days"],
+                    "浮虧HKD": l["unreal_hkd"]} for l in
+                    sorted(lots, key=lambda x: -x["days"])])
+                st.dataframe(theme.color_pnl(_ldf, ["浮虧HKD"]),
+                             use_container_width=True, hide_index=True)
 
     st.subheader("現時違規(狀態掃描)")
     for v in rules.scan_portfolio(session, prices):
@@ -423,19 +478,40 @@ with tab7:
             except ValueError as e:
                 st.error(str(e))
 
-# ---- AI 顧問(§7 /advisor:組合快照 → Claude,掛免責) ----
+# ---- AI 顧問(§7 /advisor:組合快照 → Claude / 火山方舟,掛免責) ----
 with tab_ai:
     st.subheader("AI 顧問(組合快照分析)")
-    st.caption("只餵事實快照(持倉/勝率/違規/集中度)俾 Claude,唔預測股價。"
-               "未設定 ANTHROPIC_API_KEY 會回離線快照。")
-    q = st.text_area("問題", value="根據我嘅組合快照,最需要注意嘅行為風險係乜?")
-    if st.button("問 AI 顧問"):
+    st.caption("只餵事實快照(持倉/勝率/違規/集中度)俾 AI,唔預測股價。")
+
+    with st.expander("① 設定後端(Anthropic 官方 或 火山引擎方舟)", expanded=True):
+        provider = st.radio("供應商", ["火山引擎方舟(ark)", "Anthropic 官方"],
+                            horizontal=True)
+        if provider.startswith("火山"):
+            default_url = "https://ark.cn-beijing.volces.com/api/plan"
+            default_model = "ark-code-latest"
+            st.caption("火山方舟兼容 Anthropic 協議。喺方舟「開通模型」攞 API Key,"
+                       "Base URL 用官方畀嘅『兼容 Anthropic 接口協議』嗰條。")
+        else:
+            default_url = ""
+            default_model = "claude-opus-4-8"
+        c1, c2 = st.columns(2)
+        ai_url = c1.text_input("Base URL(Anthropic 官方留空)", value=default_url)
+        ai_model = c2.text_input("模型", value=default_model)
+        ai_key = st.text_input("API Key", type="password",
+                               help="只留喺呢個 session,唔會寫入檔案")
+
+    q = st.text_area("② 問題", value="根據我嘅組合快照,最需要注意嘅行為風險係乜?")
+    if st.button("問 AI 顧問", type="primary"):
         with st.spinner("分析緊…"):
-            res = advisor.ask(session, prices, q)
+            res = advisor.ask(session, prices, q,
+                              api_key=ai_key or None,
+                              base_url=ai_url or None,
+                              model=ai_model or None)
         if res["offline"]:
-            st.info("離線模式(未設定 API key)— 以下係餵入嘅事實快照:")
+            st.info(res["answer"].split("\n")[0])   # 顯示離線/失敗原因一行
             st.json(res["context"])
         else:
+            st.caption(f"來源:{res.get('endpoint')} · 模型:{res.get('model')}")
             st.markdown(res["answer"])
     with st.expander("預覽會餵入嘅組合快照(純事實,無預測)"):
         st.json(advisor.build_snapshot_context(session, prices))
