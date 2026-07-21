@@ -71,6 +71,13 @@ docker compose up --build            # UI:8501 · API:8000 · Postgres:5432
 - 測試 31 → 47 條全綠。收益基準釘死:**0941 含息未實現 = 252,386**(§8 fixture 8 對數)、
   滾動12個月股息 26,350、yield-on-cost 10.2%
 
+## 視覺主題(Linear × Bloomberg terminal)
+- `ui/theme.py` + `.streamlit/config.toml` —— 暗色機構級介面:near-black canvas
+  (#010102)、Inter + tabular numbers、hairline 邊、單一 lavender accent(#5e6ad2)、
+  緊湊資料密度、TradingView 式暗色圖表、損益紅綠色碼、Bloomberg 式 sortable/sticky 表格。
+- 無漸變 / 無玻璃 / 無霓虹。主題**純外觀**:唔改任何功能、文案或數字口徑。
+- 換風格淨係改 `ui/theme.py` 頂部嘅 design tokens(色 / 字距)即可,唔使掂業務碼。
+
 ## 里程碑狀態
 Sprint 1-4 全部交付完成。SPEC §9 四個 sprint 已行完;§10 scope 外項目(實時串流、
 自動落單、沽空/期權、多用戶)按約唔做。

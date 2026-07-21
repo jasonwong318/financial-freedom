@@ -1,4 +1,8 @@
-"""Streamlit UI — 規格書 §6(Sprint 3 版:七頁)。
+"""Streamlit UI — 規格書 §6(九頁)。
+
+視覺:Linear × Bloomberg terminal 暗色主題,由 ui/theme.py + .streamlit/config.toml
+提供(near-black canvas、Inter/tabular numbers、hairline 邊、lavender accent、
+損益紅綠色碼、TradingView 式圖表)。主題純外觀,唔改任何功能或數據口徑。
 
 跑法:
     pip install streamlit yfinance
@@ -8,6 +12,9 @@
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# `import theme`:ui/ 加去 path 最後(唔可以放前,否則 ui/app.py 會遮蔽 app/ 套件)
+if os.path.dirname(__file__) not in sys.path:
+    sys.path.append(os.path.dirname(__file__))
 
 from datetime import date, datetime
 import streamlit as st
@@ -21,12 +28,15 @@ from app.prices import YFinanceProvider, ManualPriceProvider, store_eod, latest_
 from app.performance import portfolio_xirr, build_snapshot, twrr
 from app import config
 from app.config import to_hkd
+import theme
 
 DB_URL = os.environ.get("PORTFOLIO_DB_URL", "sqlite:///portfolio.db")
 CSV_DEFAULT = os.path.join(os.path.dirname(__file__), "..", "tests", "data",
                            "Stock-20260711.csv")
 
-st.set_page_config(page_title="Portfolio System", layout="wide")
+st.set_page_config(page_title="Portfolio System", layout="wide",
+                   initial_sidebar_state="expanded")
+theme.inject(st)          # Linear × Bloomberg 暗色主題(純外觀,無改功能)
 
 
 @st.cache_resource
@@ -176,8 +186,9 @@ with tab_inc:
             "持有期股息": round(r["held_div_hkd"]),
             "③yield-on-cost": f"{r['yield_on_cost']*100:.1f}%" if r["yield_on_cost"] else "—",
         })
-    st.dataframe(pd.DataFrame(prows).sort_values("②含息未實現",
-                 ascending=False, na_position="last"),
+    _pdf = pd.DataFrame(prows).sort_values("②含息未實現",
+                                           ascending=False, na_position="last")
+    st.dataframe(theme.color_pnl(_pdf, ["①價差未實現", "②含息未實現", "持有期股息"]),
                  use_container_width=True, hide_index=True)
     st.caption("收息倉排序用「②含息未實現」— 業主鐵律:評估收息股一律含息總回報。")
 
@@ -217,7 +228,9 @@ with tab2:
         })
     df = (pd.DataFrame(rows).sort_values("現時持倉收益HKD",
                                           ascending=True, na_position="last"))
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(theme.color_pnl(df, ["現時持倉收益HKD", "lifetime已實現HKD",
+                                      "累計股息HKD"]),
+                 use_container_width=True, hide_index=True)
     st.caption("StockerX 會將三欄加埋做一個誤導數字;本系統永遠分開。")
 
 # ---- 已平倉(§6.4) ----
@@ -226,7 +239,8 @@ with tab3:
     df = pd.DataFrame([{"標的": r["symbol"], "平倉日": r["sell_dt"].date(),
                         "持有日數": r["hold_days"],
                         "已實現HKD": round(r["pnl_hkd"])} for r in rts])
-    st.dataframe(df.sort_values("平倉日", ascending=False),
+    st.dataframe(theme.color_pnl(df.sort_values("平倉日", ascending=False),
+                                 ["已實現HKD"]),
                  use_container_width=True, hide_index=True)
     st.caption(f"共 {rs['rounds']} 回合 · 勝率 {rs['win_rate']:.1%} · "
                f"賺賠比 {rs['pl_ratio']:.2f} · 期望值 {rs['expectancy_hkd']:,.0f}/回合")
@@ -309,9 +323,9 @@ with tab5:
         c2.metric("蝕回合平均持倉", f"{disp['avg_hold_loss_days']:.0f} 日")
     if disp["open_loser_lots"]:
         st.caption("蝕緊嘅 open lots(賬齡排序)— 真正嘅蝕貨全部匿喺度:")
-        st.dataframe(pd.DataFrame(disp["open_loser_lots"])
-                     .rename(columns={"symbol": "標的", "days": "揸咗(日)",
-                                      "unreal_hkd": "浮虧HKD"}),
+        _ldf = pd.DataFrame(disp["open_loser_lots"]).rename(
+            columns={"symbol": "標的", "days": "揸咗(日)", "unreal_hkd": "浮虧HKD"})
+        st.dataframe(theme.color_pnl(_ldf, ["浮虧HKD"]),
                      use_container_width=True, hide_index=True)
 
     st.subheader("現時違規(狀態掃描)")
@@ -320,10 +334,10 @@ with tab5:
 
     st.subheader("歷史違規回顧(含每單最終結果)")
     if outs:
-        st.dataframe(pd.DataFrame([{"規則": o["rule"], "標的": o["symbol"],
-                                    "詳情": o["message"],
-                                    "最終結果HKD": o["outcome_hkd"]}
-                                   for o in outs]),
+        _odf = pd.DataFrame([{"規則": o["rule"], "標的": o["symbol"],
+                              "詳情": o["message"],
+                              "最終結果HKD": o["outcome_hkd"]} for o in outs])
+        st.dataframe(theme.color_pnl(_odf, ["最終結果HKD"]),
                      use_container_width=True, hide_index=True)
         st.caption("違規成本 = 所有負結果合計;「違咗規但好彩賺咗」唔會攞嚟溝淡。")
 
@@ -351,8 +365,10 @@ with tab6:
             import plotly.express as px_
             fig = px_.treemap(pd.DataFrame(tm), path=["板塊", "標的"],
                               values="市值HKD",
-                              title="市值集中度(顏色深 = 權重大)")
-            st.plotly_chart(fig, use_container_width=True)
+                              title="市值集中度(面積 = 權重大)",
+                              color_discrete_sequence=[theme.ACCENT, theme.POS,
+                                                       theme.AMBER, "#7a7fad"])
+            st.plotly_chart(theme.plotly_dark(fig), use_container_width=True)
         except ImportError:
             st.dataframe(pd.DataFrame(tm).sort_values("市值HKD", ascending=False),
                          use_container_width=True, hide_index=True)

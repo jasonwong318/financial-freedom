@@ -1,0 +1,15 @@
+# 視覺主題 — Linear(near-black canvas + lavender accent)× Bloomberg terminal 密度。
+# 呢個檔控制所有 widget / 表格 / 圖表嘅底層配色;細節樣式喺 ui/theme.py 用 CSS 疊。
+[theme]
+base = "dark"
+primaryColor = "#5e6ad2"              # Linear lavender —— 系統唯一 accent
+backgroundColor = "#010102"           # canvas:near-pure black,微藍
+secondaryBackgroundColor = "#0f1011"  # surface-1:卡 / 側欄
+textColor = "#f7f8f8"                 # ink
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
