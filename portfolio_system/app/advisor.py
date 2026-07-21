@@ -55,6 +55,28 @@ def build_snapshot_context(session, prices: dict) -> dict:
     }
 
 
+def resolve_config(api_key=None, base_url=None, model=None):
+    """統一解析後端設定(參數 > 環境變數 > 預設)。回傳 (api_key, base_url, model)。"""
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ARK_API_KEY")
+    base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL")
+    model = model or os.environ.get("ADVISOR_MODEL") or "claude-opus-4-8"
+    return api_key, base_url, model
+
+
+def build_client(api_key=None, base_url=None):
+    """建 anthropic client(支援火山方舟 base_url)。回傳 (client, err_str)。"""
+    if not api_key:
+        return None, "未設定 API Key"
+    try:
+        import anthropic
+    except ImportError:
+        return None, "未安裝 anthropic SDK(pip install anthropic)"
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return anthropic.Anthropic(**kwargs), None
+
+
 def ask(session, prices: dict, question: str, *, model=None, api_key=None,
         base_url=None, max_tokens=1024) -> dict:
     """問 AI 顧問。回傳 {answer, offline, context}。

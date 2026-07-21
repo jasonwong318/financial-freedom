@@ -246,36 +246,56 @@ def stat(container, label, value, sub=None, tone="neutral"):
     container.markdown(html, unsafe_allow_html=True)
 
 
-def donut(pairs, hole=0.55, breach=None):
+def donut(pairs, hole=0.58, breach=None, min_pct=0.025):
     """甜甜圈圖(規格書 §6.1)。pairs = [(label, value), ...]。
 
-    breach:> 呢個比例(如 0.15)嘅扇區用紅色標示(15% 集中度上限)。
+    - 最大倉位置於圓形頂部(rotation 令佢橫跨 12 點鐘位)
+    - 細過 min_pct 嘅倉位聚合成「其他」,免細扇區標籤逼到睇唔到
+    - breach(如 0.15):超標扇區紅色(15% 集中度上限)
+    - 標籤外置 + 引線,暗底都清楚
     回傳 plotly fig(已套暗色);冇 plotly 就回 None。
     """
     try:
         import plotly.graph_objects as go
     except ImportError:
         return None
-    labels = [p[0] for p in pairs]
-    values = [p[1] for p in pairs]
-    total = sum(values) or 1
+    total = sum(v for _, v in pairs) or 1
+    big = sorted([(l, v) for l, v in pairs], key=lambda x: -x[1])
+    kept = [(l, v) for l, v in big if v / total >= min_pct]
+    small_sum = sum(v for l, v in big if v / total < min_pct)
+    if small_sum > 0:
+        n_small = sum(1 for l, v in big if v / total < min_pct)
+        kept.append((f"其他 {n_small} 隻", small_sum))
+
+    labels = [l for l, _ in kept]
+    values = [v for _, v in kept]
     palette = [ACCENT, "#7a7fad", POS, AMBER, "#5b8def", "#9b8cff",
-               INK_SUBTLE, "#6b7280"]
+               "#4db6ac", "#c77dff", INK_SUBTLE, "#6b7280"]
     colors = []
-    for i, v in enumerate(values):
-        if breach is not None and v / total > breach:
+    for i, (l, v) in enumerate(kept):
+        if l.startswith("其他"):
+            colors.append("#3a3d44")                 # 「其他」用灰
+        elif breach is not None and v / total > breach:
             colors.append(NEG)                       # 超標扇區紅色
         else:
             colors.append(palette[i % len(palette)])
+
+    # 令最大倉橫跨頂部:由 12 點鐘位向逆時針退半個最大扇區
+    largest_frac = values[0] / total if values else 0
+    rotation = -largest_frac * 180
+
     fig = go.Figure(go.Pie(
         labels=labels, values=values, hole=hole, sort=True, direction="clockwise",
+        rotation=rotation,
         marker=dict(colors=colors, line=dict(color=CANVAS, width=1.5)),
-        textinfo="label+percent", textfont=dict(size=11, color=INK),
+        textinfo="label+percent", textposition="outside",
+        textfont=dict(size=12, color=INK), automargin=True,
+        insidetextorientation="horizontal",
         hovertemplate="%{label}: HKD %{value:,.0f} (%{percent})<extra></extra>"))
     fig.update_layout(
         paper_bgcolor=CANVAS, plot_bgcolor=CANVAS, showlegend=False,
-        font=dict(color=INK, family="Inter"), margin=dict(t=10, l=10, r=10, b=10),
-        height=340)
+        font=dict(color=INK, family="Inter"), margin=dict(t=20, l=60, r=60, b=20),
+        height=420)
     return fig
 
 

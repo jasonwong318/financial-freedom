@@ -9,7 +9,7 @@ import pytest
 from app.models import make_session
 from app.importer import import_stockerx_csv
 from app.fifo import rebuild_lots
-from app import metrics, behavior, config, advisor, rules
+from app import metrics, behavior, config, advisor, rules, committee
 
 from tests.test_sprint2 import PX_20260710, VAL_DATE
 
@@ -78,6 +78,45 @@ def test_advisor_offline_no_key(session, monkeypatch):
     res = advisor.ask(session, PX_20260710, "測試", api_key=None)
     assert res["offline"] is True
     assert "TSLA" in res["context"]["position_weights"]
+
+
+# ---- 十條規則實際要求(UI 顯示用):渲染出具體數字 ----
+def test_rule_requirement_concrete():
+    req = rules.rule_requirement("AVG_DOWN_LIMIT",
+                                 {"n": 2, "min_drop_pct": 15, "max_size_pct": 50})
+    assert "2 次" in req and "15%" in req and "50%" in req
+    assert "15%" in rules.rule_requirement("MAX_POSITION_WEIGHT", {"pct": 15})
+    # 全部十條都渲染到句子(唔會 raise、唔會回空)
+    for code, params in rules.DEFAULT_RULES.items():
+        s = rules.rule_requirement(code, params)
+        assert isinstance(s, str) and len(s) > 4
+
+
+# ---- 投資委員會:快照 + preamble 事實正確;冇 key offline ----
+def test_committee_snapshot(session):
+    snap = committee.snapshot_text(session, PX_20260710)
+    assert "TSLA" in snap and "0941.HK" in snap
+    assert "累計股息" in snap
+    # 0941 持有期股息 117,536 應該喺快照入面
+    assert "117536" in snap.replace(",", "")
+
+
+def test_committee_preamble_structure(session):
+    pre = committee.preamble(session, PX_20260710, "TSLA 減唔減?")
+    # 五個角色標題齊 + 含息總回報要求 + 免責
+    for role in ("牛方分析師", "熊方分析師", "魔鬼代言人", "價值視角",
+                 "投資組合經理裁決"):
+        assert role in pre
+    assert "含息總回報" in pre
+    assert "TSLA 減唔減?" in pre
+
+
+def test_committee_offline_without_key(session, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    res = committee.convene(session, PX_20260710, [], "測試", api_key=None)
+    assert res["ok"] is False and res["error"]        # 冇 key → 唔 call 網,回錯
+    assert res["history"] == []                        # 唔會污染 history
 
 
 def test_advisor_context_facts_only(session):

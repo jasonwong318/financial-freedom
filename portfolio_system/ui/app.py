@@ -23,7 +23,8 @@ import pandas as pd
 from app.models import make_session, Transaction, Instrument, RuleViolation, Rule
 from app.importer import import_stockerx_csv
 from app.fifo import rebuild_lots
-from app import metrics, rules, behavior, assets, reports, income, benchmark, fx, advisor
+from app import (metrics, rules, behavior, assets, reports, income, benchmark,
+                 fx, advisor, committee)
 from app.prices import YFinanceProvider, ManualPriceProvider, store_eod, latest_prices
 from app.performance import portfolio_xirr, build_snapshot, twrr
 from app import config
@@ -34,7 +35,7 @@ DB_URL = os.environ.get("PORTFOLIO_DB_URL", "sqlite:///portfolio.db")
 CSV_DEFAULT = os.path.join(os.path.dirname(__file__), "..", "tests", "data",
                            "Stock-20260711.csv")
 
-st.set_page_config(page_title="Portfolio System", layout="wide",
+st.set_page_config(page_title="Investment Committee 投資委員會", layout="wide",
                    initial_sidebar_state="expanded")
 theme.inject(st)          # Linear × Bloomberg 暗色主題(純外觀,無改功能)
 
@@ -50,7 +51,7 @@ def get_session():
 
 
 session = get_session()
-st.title("Portfolio System")
+st.title("Investment Committee · 投資委員會")
 st.caption(f"lot-level 口徑 · {config.fx_note()} · 取代 StockerX")
 
 # ---- 側欄:匯入 CSV + 攞價 + 匯率口徑 ----
@@ -125,7 +126,7 @@ with st.sidebar:
 
 tab1, tab_inc, tab2, tab3, tab4, tab5, tab6, tab7, tab_ai = st.tabs(
     ["總覽", "收益", "持倉", "已平倉", "新增交易", "行為儀表板",
-     "全資產", "報表", "AI顧問"])
+     "全資產", "報表", "投資委員會"])
 
 # ---- 總覽(§6.1) ----
 with tab1:
@@ -278,11 +279,12 @@ RULE_DESC = {
     "REBUY_HIGHER": "沽出後短期高追返",
 }
 with tab4:
-    with st.expander("十條行為規則(現行參數)", expanded=False):
+    with st.expander("十條行為規則(實際要求)", expanded=False):
         rrows = []
         for r in session.query(Rule).order_by(Rule.code).all():
-            rrows.append({"規則": r.code, "說明": RULE_DESC.get(r.code, ""),
-                          "參數": str(r.params), "啟用": "✓" if r.enabled else "✗"})
+            rrows.append({"規則": r.code, "類別": RULE_DESC.get(r.code, ""),
+                          "實際要求": rules.rule_requirement(r.code, r.params),
+                          "啟用": "✓" if r.enabled else "✗"})
         st.dataframe(pd.DataFrame(rrows), use_container_width=True, hide_index=True)
         st.caption("錄入交易時會自動全部過一次;違規彈警示卡但可 override(記錄在案)。")
 
@@ -337,6 +339,32 @@ with tab4:
             st.success(f"已錄入並重算 FIFO:{p['side']} {p['symbol']} "
                        f"{p['qty']:g} @ {p['price']}")
             st.rerun()
+
+    st.subheader("記一筆股息(收到現金派息就喺度記)")
+    with st.form("new_div"):
+        d1, d2, d3, d4 = st.columns(4)
+        dv_symbol = d1.text_input("代號(e.g. 0941.HK)").strip().upper()
+        dv_date = d2.date_input("派息日", value=date.today(), key="dv_date")
+        dv_amt = d3.number_input("股息總額(原幣現金)", min_value=0.0, format="%.2f")
+        dv_ccy = d4.selectbox("幣種", ["HKD", "USD"], key="dv_ccy")
+        if st.form_submit_button("記低股息") and dv_symbol and dv_amt > 0:
+            inst = session.query(Instrument).filter_by(symbol=dv_symbol).first()
+            if not inst:
+                mkt = "HK" if dv_symbol.endswith(".HK") else "US"
+                inst = Instrument(symbol=dv_symbol, market=mkt, ccy=dv_ccy)
+                session.add(inst)
+                session.flush()
+            # DIV_CASH:price 欄 = 股息總金額(同 CSV importer 一致);qty 留空
+            session.add(Transaction(
+                account_id=1, instrument_id=inst.id,
+                trade_dt=datetime.combine(dv_date, datetime.min.time()),
+                type="DIV_CASH", price=dv_amt, qty=None, fee=0,
+                ccy=dv_ccy, source="manual"))
+            session.commit()
+            st.success(f"已記:{dv_symbol} 股息 {dv_ccy} {dv_amt:,.2f}("
+                       f"{dv_date})— 收益/股息頁即時反映")
+            st.rerun()
+    st.caption("股息唔影響 FIFO 持倉,直接入賬;收益頁「股息」同含息總回報會即時更新。")
 
 # ---- 行為儀表板(§6.6:業主獨有殺手功能) ----
 with tab5:
@@ -478,40 +506,103 @@ with tab7:
             except ValueError as e:
                 st.error(str(e))
 
-# ---- AI 顧問(§7 /advisor:組合快照 → Claude / 火山方舟,掛免責) ----
+# ---- 投資委員會(多角度辯論:牛/熊/魔鬼代言人/價值/PM 裁決,多輪 + 續寫) ----
+def _cm_render_turn(t):
+    """一輪對話:user 灰底,ai 把【角色】做小標題。"""
+    if t["kind"] == "user":
+        st.markdown(f'<div style="background:{theme.SURFACE_2};border-radius:8px;'
+                    f'padding:8px 12px;color:{theme.INK_SUBTLE};font-size:.85rem;'
+                    f'margin:6px 0;">🙋 {t["text"]}</div>', unsafe_allow_html=True)
+    else:
+        body = t["text"].replace("【", f'<b style="color:{theme.AMBER}">【').replace(
+            "】", "】</b>")
+        st.markdown(f'<div style="background:{theme.SURFACE_1};border:1px solid '
+                    f'{theme.HAIRLINE};border-radius:8px;padding:12px 14px;'
+                    f'margin:6px 0;white-space:pre-wrap;font-size:.9rem;">{body}</div>',
+                    unsafe_allow_html=True)
+
+
 with tab_ai:
-    st.subheader("AI 顧問(組合快照分析)")
-    st.caption("只餵事實快照(持倉/勝率/違規/集中度)俾 AI,唔預測股價。")
+    st.subheader("投資委員會")
+    st.caption("五個角色(牛方 / 熊方 / 魔鬼代言人 / 價值視角 / PM 裁決)辯論你嘅真實組合。"
+               "可多輪追問,委員會記住上文。只用嚟逼自己諗多幾個角度,唔構成投資建議。")
 
-    with st.expander("① 設定後端(Anthropic 官方 或 火山引擎方舟)", expanded=True):
+    with st.expander("① 設定後端(Anthropic 官方 或 火山引擎方舟)",
+                     expanded=not st.session_state.get("cm_key")):
         provider = st.radio("供應商", ["火山引擎方舟(ark)", "Anthropic 官方"],
-                            horizontal=True)
+                            horizontal=True, key="cm_provider")
         if provider.startswith("火山"):
-            default_url = "https://ark.cn-beijing.volces.com/api/plan"
-            default_model = "ark-code-latest"
-            st.caption("火山方舟兼容 Anthropic 協議。喺方舟「開通模型」攞 API Key,"
-                       "Base URL 用官方畀嘅『兼容 Anthropic 接口協議』嗰條。")
+            default_url, default_model = "https://ark.cn-beijing.volces.com/api/plan", "ark-code-latest"
+            st.caption("喺方舟「開通模型」攞 API Key;Base URL 用官方『兼容 Anthropic 接口協議』嗰條。")
         else:
-            default_url = ""
-            default_model = "claude-opus-4-8"
-        c1, c2 = st.columns(2)
-        ai_url = c1.text_input("Base URL(Anthropic 官方留空)", value=default_url)
-        ai_model = c2.text_input("模型", value=default_model)
-        ai_key = st.text_input("API Key", type="password",
-                               help="只留喺呢個 session,唔會寫入檔案")
+            default_url, default_model = "", "claude-opus-4-8"
+        cc1, cc2 = st.columns(2)
+        st.session_state["cm_url"] = cc1.text_input("Base URL(官方留空)", value=default_url)
+        st.session_state["cm_model"] = cc2.text_input("模型", value=default_model)
+        st.session_state["cm_key"] = st.text_input(
+            "API Key", type="password", value=st.session_state.get("cm_key", ""),
+            help="只留喺呢個 session,唔會寫入檔案")
 
-    q = st.text_area("② 問題", value="根據我嘅組合快照,最需要注意嘅行為風險係乜?")
-    if st.button("問 AI 顧問", type="primary"):
-        with st.spinner("分析緊…"):
-            res = advisor.ask(session, prices, q,
-                              api_key=ai_key or None,
-                              base_url=ai_url or None,
-                              model=ai_model or None)
-        if res["offline"]:
-            st.info(res["answer"].split("\n")[0])   # 顯示離線/失敗原因一行
-            st.json(res["context"])
+    st.session_state.setdefault("cm_history", [])
+    st.session_state.setdefault("cm_thread", [])
+    st.session_state.setdefault("cm_truncated", False)
+
+    def _cm_call(question, display):
+        cfg = dict(api_key=st.session_state.get("cm_key") or None,
+                   base_url=st.session_state.get("cm_url") or None,
+                   model=st.session_state.get("cm_model") or None)
+        if display is not None:
+            st.session_state["cm_thread"].append({"kind": "user", "text": display})
+        with st.spinner("委員會開緊會…"):
+            res = committee.convene(session, prices, st.session_state["cm_history"],
+                                    question, **cfg)
+        if not res["ok"]:
+            st.session_state["cm_thread"].append(
+                {"kind": "ai", "text": f"(連線失敗:{res['error']})"})
         else:
-            st.caption(f"來源:{res.get('endpoint')} · 模型:{res.get('model')}")
-            st.markdown(res["answer"])
-    with st.expander("預覽會餵入嘅組合快照(純事實,無預測)"):
-        st.json(advisor.build_snapshot_context(session, prices))
+            st.session_state["cm_history"] = res["history"]
+            st.session_state["cm_thread"].append({"kind": "ai", "text": res["text"]})
+            st.session_state["cm_truncated"] = res["truncated"]
+
+    first_round = not st.session_state["cm_history"]
+    # 預設問題 chips
+    st.caption("快速議題:")
+    chip_cols = st.columns(len(committee.CHIPS))
+    for i, (label, qtext) in enumerate(committee.CHIPS):
+        if chip_cols[i].button(label, key=f"cm_chip_{i}"):
+            _cm_call(qtext, qtext)
+            st.rerun()
+
+    # 對話串
+    for t in st.session_state["cm_thread"]:
+        _cm_render_turn(t)
+
+    q = st.text_area("問題" if first_round else "追問(委員會記得上文)",
+                     key="cm_q",
+                     placeholder="輸入問題;開完會之後呢度變追問框…")
+    b1, b2, b3 = st.columns([2, 2, 6])
+    if b1.button("召開委員會" if first_round else "追問", type="primary",
+                 key="cm_ask"):
+        if q.strip():
+            _cm_call(q.strip(), q.strip())
+            st.rerun()
+    if st.session_state["cm_truncated"]:
+        if b2.button("繼續生成", key="cm_more"):
+            r = committee.continue_generation(
+                session, prices, st.session_state["cm_history"],
+                api_key=st.session_state.get("cm_key") or None,
+                base_url=st.session_state.get("cm_url") or None,
+                model=st.session_state.get("cm_model") or None)
+            if r["ok"]:
+                st.session_state["cm_history"] = r["history"]
+                st.session_state["cm_thread"].append({"kind": "ai", "text": r["text"]})
+                st.session_state["cm_truncated"] = r["truncated"]
+            st.rerun()
+    if b3.button("重開會議", key="cm_reset"):
+        st.session_state["cm_history"] = []
+        st.session_state["cm_thread"] = []
+        st.session_state["cm_truncated"] = False
+        st.rerun()
+
+    with st.expander("預覽會餵入委員會嘅持倉快照(純事實)"):
+        st.code(committee.snapshot_text(session, prices))

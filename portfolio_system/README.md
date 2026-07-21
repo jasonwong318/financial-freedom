@@ -1,4 +1,4 @@
-# Portfolio System — Sprint 4(收益頁 + 基準 + 歷史匯率 + FastAPI + AI顧問 + Docker)
+# Investment Committee 投資委員會(前身 Portfolio System)
 
 取代 StockerX 嘅自建績效追蹤系統。完整需求見 `SPEC_portfolio_system.md`(另附)。
 
@@ -90,6 +90,17 @@ docker compose up --build            # UI:8501 · API:8000 · Postgres:5432
   UI 內可揀供應商、填 Base URL(`https://ark.cn-beijing.volces.com/api/plan`)+
   模型(`ark-code-latest`)+ Key,或用環境變數 ANTHROPIC_BASE_URL / ADVISOR_MODEL
 - 測試 47 → 52 條全綠
+
+## UI v3(業主反饋第二版)
+- 系統改名「Investment Committee 投資委員會」(標題 + AI 頁 tab)
+- 總覽甜甜圈:最大倉位(Tesla)置頂橫跨,細倉聚合成「其他 N 隻」,標籤外置易讀
+- 新增交易頁加「記一筆股息」表(DIV_CASH),收/派息即時反映收益頁
+- 十條規則改顯示**實際要求**句子(渲染真實參數,如「溝貨最多 2 次;要跌 ≥15% 先可溝;
+  單次注碼 ≤現倉 50%」),`rules.rule_requirement()`
+- **投資委員會**(`app/committee.py`,搬自業主 Fable 5 版):牛/熊/魔鬼代言人/價值/PM
+  五角色辯論,多輪追問記住上文,截斷可「繼續生成」,「重開會議」用最新快照重來,
+  收息倉檢討用含息總回報;後端經 advisor.build_client 支援火山方舟
+- 測試 52 → 56 條全綠
 
 ## 里程碑狀態
 Sprint 1-4 全部交付完成。SPEC §9 四個 sprint 已行完;§10 scope 外項目(實時串流、

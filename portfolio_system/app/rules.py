@@ -31,6 +31,37 @@ DEFAULT_RULES = {
 }
 
 
+def rule_requirement(code: str, params: dict) -> str:
+    """將規則參數渲染成「實際要求」句子(UI 顯示用,唔淨係列 raw params)。"""
+    p = params or {}
+    try:
+        if code == "MAX_POSITION_WEIGHT":
+            return f"單一標的市值唔可以超過組合 {p['pct']}%"
+        if code == "MAX_SECTOR_WEIGHT":
+            return f"同一板塊合計市值唔可以超過組合 {p['pct']}%"
+        if code == "MAX_SINGLE_ENTRY":
+            return f"單筆買入金額唔可以超過總資產 {p['pct']}%"
+        if code == "AVG_DOWN_LIMIT":
+            return (f"同一隻溝貨最多 {p['n']} 次;要跌 ≥{p['min_drop_pct']}% 先可以溝;"
+                    f"單次注碼唔可以超過現倉成本 {p['max_size_pct']}%")
+        if code == "CHASE_HIGH":
+            return f"買入價唔可以喺 20 日高位 {p['pct']}% 之內(避免高追)"
+        if code == "STALE_LOSER":
+            return f"帳面蝕 >{p['loss_pct']}% 又揸超過 {p['days']} 日 → 強制檢討"
+        if code == "STOP_LOSS_ALERT":
+            return f"衛星倉浮虧穿 −{p['satellite']}%(投機倉 −{p['spec']}%)發止蝕提示"
+        if code == "WEEKLY_CIRCUIT_BREAKER":
+            return (f"一週已實現虧損超過總資產 {p['pct']}% → 建議停新倉 "
+                    f"{p['cooloff_days']} 個交易日")
+        if code == "FEE_CHECK":
+            return f"預期毛利要 ≥{p['mult']} 倍來回手續費先值得做"
+        if code == "REBUY_HIGHER":
+            return f"沽出後 {p['days']} 日內唔好以高 >{p['pct']}% 價買返同一隻"
+    except KeyError:
+        pass
+    return str(p)
+
+
 def seed_rules(session):
     """預設十條規則入庫(冪等:已存在嘅唔郁,保留業主改過嘅參數)。"""
     existing = {r.code for r in session.query(Rule).all()}
