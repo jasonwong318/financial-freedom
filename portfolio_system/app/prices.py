@@ -32,7 +32,10 @@ class YFinanceProvider:
         out = {}
         for s in symbols:
             try:
-                hist = yf.Ticker(s).history(start=on_date, period="5d")
+                # 只用 period 攞最近 N 個交易日,取最後一個收市。
+                # (唔可以同時傳 start=on_date + period:yfinance 會當「on_date 之後」,
+                #  而今日未收市 → 回空 → 美股更新唔到,呢個係之前嘅 bug。)
+                hist = yf.Ticker(s).history(period="5d", auto_adjust=False)
                 out[s] = float(hist["Close"].iloc[-1]) if len(hist) else None
             except Exception:
                 out[s] = None

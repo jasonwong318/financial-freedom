@@ -52,6 +52,26 @@ PERSONAS = {
         "Dalio(宏觀 / 風險平價)",
         "由經濟週期同宏觀環境睇資產配置;強調分散同風險平價,唔好單一注押身家;"
         "問:呢個組合喺唔同宏觀情境下點表現?"),
+    "graham": (
+        "格雷厄姆(深度價值 / 安全邊際)",
+        "只買明顯低於內在價值嘅嘢,要有足夠安全邊際;睇資產淨值、盈利穩定性;"
+        "把 Mr. Market 當情緒化對手而非老師;最忌為增長故事付高價。"),
+    "wood": (
+        "Cathie Wood(顛覆式創新)",
+        "睇 5 年以上、指數級增長嘅顛覆技術(AI、機械人、基因、能源);容忍短期波動同高估值,"
+        "賭平台級贏家。做組合嘅樂觀對照鏡,提醒唔好因為悶而錯過結構性趨勢。"),
+    "ackman": (
+        "Ackman(集中優質 / 催化劑)",
+        "重注少數睇得通、有品牌護城河同強自由現金流嘅優質股;睇有冇催化劑解鎖價值;"
+        "接受集中,但要求論點清晰、可驗證。"),
+    "fisher": (
+        "Fisher(質素成長 / scuttlebutt)",
+        "落場做功課(scuttlebutt):查管理層、研發、客戶口碑同長期競爭力;"
+        "買到好公司就長揸贏家,唔為短期估值波動亂沽。"),
+    "druckenmiller": (
+        "Druckenmiller(宏觀 + 非對稱)",
+        "有把握先重注、非對稱回報(蝕有限、賺無限);高度重視流動性同市場定位;"
+        "睇錯就快認、快走,唔同隻股談戀愛。"),
 }
 
 GUEST_DISCLAIMER = ("客席委員只係以該投資者『公開嘅分析框架 / 風格』模擬嘅角度,"
@@ -95,32 +115,45 @@ def snapshot_text(session, prices: dict) -> str:
     return header + "\n" + "\n".join(lines)
 
 
-def _role_block(personas=None):
-    """砌首輪回答嘅角色結構。核心四角色 + 客席名人視角 +(最後)PM 裁決。"""
+def _role_block(personas=None, bull=None, bear=None):
+    """砌首輪回答嘅角色結構。核心四角色 + 客席名人視角 +(最後)PM 裁決。
+
+    bull / bear:可選,傳 persona key → 個牛方/熊方席位由該名人扮演(帶佢嘅框架)。
+    """
+    guest_notes = []
+
+    def _seat(label, extra, persona_key):
+        if persona_key and persona_key in PERSONAS:
+            name, lens = PERSONAS[persona_key]
+            guest_notes.append(f"- {name}:{lens}")
+            return f"【{label} · {name} 視角】"
+        return f"【{label}】{extra}"
+
     lines = [
-        "【牛方分析師】",
-        "【熊方分析師】",
+        _seat("牛方分析師", "", bull),
+        _seat("熊方分析師", "", bear),
         "【魔鬼代言人】",
         "【價值視角】(能力圈/安全邊際/機會成本/股息現金流)",
     ]
-    guest_notes = []
     for key in (personas or []):
-        if key in PERSONAS:
+        if key in PERSONAS and key not in (bull, bear):     # 已坐牛/熊席就唔重複
             name, lens = PERSONAS[key]
             lines.append(f"【{name}】")
             guest_notes.append(f"- {name}:{lens}")
     lines.append("【投資組合經理裁決】(具體可執行)")
     block = "\n".join(lines)
     if guest_notes:
-        block += ("\n\n客席委員請嚴格以下面框架嘅角度發言(唔好背離佢嘅風格):\n"
+        block += ("\n\n名人席位請嚴格以下面框架嘅角度發言(唔好背離佢嘅風格):\n"
                   + "\n".join(guest_notes) + f"\n\n{GUEST_DISCLAIMER}")
     return block
 
 
-def preamble(session, prices: dict, question: str, personas=None) -> str:
+def preamble(session, prices: dict, question: str, personas=None,
+             bull=None, bear=None) -> str:
     """首輪 user message:快照 + 行為背景 + 角色結構要求 + 問題。
 
     personas:客席名人視角 key 列表(見 PERSONAS),None = 淨係核心五角色。
+    bull / bear:可選 persona key,指定牛方/熊方席位由邊位名人扮演。
     """
     return (
         "你係一個投資委員會,為香港散戶 Jason 分析佢嘅真實組合。"
@@ -129,13 +162,13 @@ def preamble(session, prices: dict, question: str, personas=None) -> str:
         f"問題:{question}\n\n"
         "用繁體中文(香港書面語)。首次回答用以下結構,每個角色最多兩句、"
         "直接講重點、引用真實數字:\n"
-        f"{_role_block(personas)}\n"
+        f"{_role_block(personas, bull, bear)}\n"
         "之後嘅追問可以自由格式,精簡回答。"
         "每次結尾一句:以上係多角度推理,唔係投資建議。")
 
 
-def convene(session, prices, history, question, *, personas=None, api_key=None,
-            base_url=None, model=None, max_tokens=1000):
+def convene(session, prices, history, question, *, personas=None, bull=None,
+            bear=None, api_key=None, base_url=None, model=None, max_tokens=1000):
     """開會 / 追問一輪。
 
     history:[{role, content}] 之前嘅對話(唔含今次問題);function 唔會就地改佢。
@@ -150,8 +183,8 @@ def convene(session, prices, history, question, *, personas=None, api_key=None,
         return {"ok": False, "text": "", "truncated": False,
                 "history": history, "error": err}
 
-    user_content = (preamble(session, prices, question, personas) if not history
-                    else question)
+    user_content = (preamble(session, prices, question, personas, bull, bear)
+                    if not history else question)
     messages = history + [{"role": "user", "content": user_content}]
     try:
         resp = client.messages.create(model=model, max_tokens=max_tokens,

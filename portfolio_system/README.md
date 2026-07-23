@@ -103,12 +103,16 @@ docker compose up --build            # UI:8501 · API:8000 · Postgres:5432
 - 測試 52 → 56 條全綠
 
 ## 客席委員(名人投資框架)
-- 靈感參考 olaxbt/ai-market-maker 嘅「乾淨 persona」概念(但呢度係投資者視角,唔係交易 desk)
-- `committee.PERSONAS`:Serenity(AI 供應鏈瓶頸)/ 巴菲特 / 芒格 / Burry / Lynch / Dalio,
-  各自一個蒸餾嘅分析框架;委員會可揀客席加入首輪辯論(預設 Serenity,對口 AI 半導體重倉)
+- 做法對標 virattt/ai-hedge-fund 嘅名人 agent(Buffett/Munger/Graham… 各自一個 agent),
+  同 titanwings colleague-skill gallery / PortfolioGlance 同一路數
+- `committee.PERSONAS`(11 位):Serenity(AI 供應鏈瓶頸)/ 巴菲特 / 芒格 / 格雷厄姆 /
+  Cathie Wood / Ackman / Fisher / Druckenmiller / Burry / Lynch / Dalio,各自一個蒸餾框架
+- **牛方 / 熊方席位可指定由邊位名人扮演**(preamble bull/bear),另可加開客席委員;
+  同一位坐咗牛/熊席就唔會重複開客席
 - 只以該投資者**公開嘅分析風格**模擬角度,附明文免責(`GUEST_DISCLAIMER`),
   唔扮真人、唔代表本人意見或背書
-- 測試 56 → 57 條全綠
+- 修正 yfinance 美股價格更新 bug(之前 start+period 矛盾令回空,改用 period 攞最近收市)
+- 測試 57 → 58 條全綠
 
 ## 里程碑狀態
 Sprint 1-4 全部交付完成。SPEC §9 四個 sprint 已行完;§10 scope 外項目(實時串流、

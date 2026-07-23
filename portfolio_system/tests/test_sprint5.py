@@ -130,6 +130,25 @@ def test_committee_guest_personas(session):
             session, PX_20260710, "x", personas=[k])
 
 
+def test_committee_bull_bear_seats(session):
+    """牛方/熊方席位可由名人扮演;唔會同客席重複。"""
+    pre = committee.preamble(session, PX_20260710, "AI 倉?",
+                             personas=["serenity"], bull="wood", bear="burry")
+    assert "牛方分析師 · Cathie Wood" in pre             # 牛方由 Wood 扮演
+    assert "熊方分析師 · Michael Burry" in pre           # 熊方由 Burry 扮演
+    assert "Serenity" in pre                            # 客席照在
+    # 若客席同牛方揀同一位,唔會多開一個獨立客席席位(避免重複發言)
+    wood_name = committee.PERSONAS["wood"][0]
+    pre2 = committee.preamble(session, PX_20260710, "x",
+                              personas=["wood"], bull="wood")
+    assert f"【{wood_name}】" not in pre2                # 冇獨立客席 header
+    assert f"牛方分析師 · {wood_name}" in pre2           # 已坐牛方席
+    # 擴充名冊齊全(≥10 位)
+    assert len(committee.PERSONAS) >= 10
+    for k in ("graham", "wood", "ackman", "fisher", "druckenmiller"):
+        assert k in committee.PERSONAS
+
+
 def test_committee_offline_without_key(session, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ARK_API_KEY", raising=False)

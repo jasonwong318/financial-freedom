@@ -547,23 +547,35 @@ with tab_ai:
     st.session_state.setdefault("cm_thread", [])
     st.session_state.setdefault("cm_truncated", False)
 
-    # 客席委員(名人投資框架)—— 只喺開新會(首輪)生效
-    guest_keys = st.multiselect(
-        "邀請客席委員(名人投資框架,首輪生效)",
-        options=list(committee.PERSONAS),
-        format_func=lambda k: committee.PERSONAS[k][0],
-        default=st.session_state.get("cm_personas", ["serenity"]),
-        help="以該投資者公開嘅分析風格模擬角度,唔代表本人實際意見。")
-    st.session_state["cm_personas"] = guest_keys
-    if guest_keys:
-        st.caption("客席:" + "、".join(committee.PERSONAS[k][0] for k in guest_keys)
-                   + " · " + committee.GUEST_DISCLAIMER)
+    # 委員會陣容(名人投資框架)—— 只喺開新會(首輪)生效
+    _pk = list(committee.PERSONAS)
+    _fmt = lambda k: "(通用分析師)" if k == "" else committee.PERSONAS[k][0]
+    with st.expander("② 委員會陣容(名人投資框架,首輪生效)", expanded=True):
+        sc1, sc2 = st.columns(2)
+        bull = sc1.selectbox("牛方由邊位扮演", [""] + _pk, format_func=_fmt,
+                             key="cm_bull")
+        bear = sc2.selectbox("熊方由邊位扮演", [""] + _pk, format_func=_fmt,
+                             key="cm_bear")
+        guest_keys = st.multiselect(
+            "加開客席委員", options=_pk,
+            format_func=lambda k: committee.PERSONAS[k][0],
+            default=st.session_state.get("cm_personas", ["serenity"]),
+            help="以該投資者公開嘅分析風格模擬角度,唔代表本人實際意見。")
+        st.session_state["cm_personas"] = guest_keys
+        seats = ([f"牛方={_fmt(bull)}"] if bull else []) + \
+                ([f"熊方={_fmt(bear)}"] if bear else []) + \
+                (["客席:" + "、".join(committee.PERSONAS[k][0] for k in guest_keys)]
+                 if guest_keys else [])
+        if seats:
+            st.caption(" · ".join(seats) + " · " + committee.GUEST_DISCLAIMER)
 
     def _cm_call(question, display):
         cfg = dict(api_key=st.session_state.get("cm_key") or None,
                    base_url=st.session_state.get("cm_url") or None,
                    model=st.session_state.get("cm_model") or None,
-                   personas=st.session_state.get("cm_personas") or None)
+                   personas=st.session_state.get("cm_personas") or None,
+                   bull=st.session_state.get("cm_bull") or None,
+                   bear=st.session_state.get("cm_bear") or None)
         if display is not None:
             st.session_state["cm_thread"].append({"kind": "user", "text": display})
         with st.spinner("委員會開緊會…"):
