@@ -547,10 +547,23 @@ with tab_ai:
     st.session_state.setdefault("cm_thread", [])
     st.session_state.setdefault("cm_truncated", False)
 
+    # 客席委員(名人投資框架)—— 只喺開新會(首輪)生效
+    guest_keys = st.multiselect(
+        "邀請客席委員(名人投資框架,首輪生效)",
+        options=list(committee.PERSONAS),
+        format_func=lambda k: committee.PERSONAS[k][0],
+        default=st.session_state.get("cm_personas", ["serenity"]),
+        help="以該投資者公開嘅分析風格模擬角度,唔代表本人實際意見。")
+    st.session_state["cm_personas"] = guest_keys
+    if guest_keys:
+        st.caption("客席:" + "、".join(committee.PERSONAS[k][0] for k in guest_keys)
+                   + " · " + committee.GUEST_DISCLAIMER)
+
     def _cm_call(question, display):
         cfg = dict(api_key=st.session_state.get("cm_key") or None,
                    base_url=st.session_state.get("cm_url") or None,
-                   model=st.session_state.get("cm_model") or None)
+                   model=st.session_state.get("cm_model") or None,
+                   personas=st.session_state.get("cm_personas") or None)
         if display is not None:
             st.session_state["cm_thread"].append({"kind": "user", "text": display})
         with st.spinner("委員會開緊會…"):

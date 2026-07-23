@@ -111,6 +111,25 @@ def test_committee_preamble_structure(session):
     assert "TSLA 減唔減?" in pre
 
 
+def test_committee_guest_personas(session):
+    """客席名人視角:選咗就入 preamble,帶免責;冇選就淨係核心五角色。"""
+    pre = committee.preamble(session, PX_20260710, "AI 倉點睇?",
+                             personas=["serenity", "buffett"])
+    assert "Serenity" in pre and "巴菲特" in pre
+    assert "供應鏈" in pre                              # Serenity 框架關鍵詞
+    assert committee.GUEST_DISCLAIMER in pre           # 一定要有免責
+    # 核心五角色依然齊
+    for role in ("牛方分析師", "投資組合經理裁決"):
+        assert role in pre
+    # 冇選客席 → 唔會出現名人
+    base = committee.preamble(session, PX_20260710, "x")
+    assert "Serenity" not in base and committee.GUEST_DISCLAIMER not in base
+    # 所有 persona key 都渲染到,唔會爆
+    for k in committee.PERSONAS:
+        assert committee.PERSONAS[k][0] in committee.preamble(
+            session, PX_20260710, "x", personas=[k])
+
+
 def test_committee_offline_without_key(session, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ARK_API_KEY", raising=False)

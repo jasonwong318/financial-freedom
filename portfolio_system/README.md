@@ -102,6 +102,14 @@ docker compose up --build            # UI:8501 · API:8000 · Postgres:5432
   收息倉檢討用含息總回報;後端經 advisor.build_client 支援火山方舟
 - 測試 52 → 56 條全綠
 
+## 客席委員(名人投資框架)
+- 靈感參考 olaxbt/ai-market-maker 嘅「乾淨 persona」概念(但呢度係投資者視角,唔係交易 desk)
+- `committee.PERSONAS`:Serenity(AI 供應鏈瓶頸)/ 巴菲特 / 芒格 / Burry / Lynch / Dalio,
+  各自一個蒸餾嘅分析框架;委員會可揀客席加入首輪辯論(預設 Serenity,對口 AI 半導體重倉)
+- 只以該投資者**公開嘅分析風格**模擬角度,附明文免責(`GUEST_DISCLAIMER`),
+  唔扮真人、唔代表本人意見或背書
+- 測試 56 → 57 條全綠
+
 ## 里程碑狀態
 Sprint 1-4 全部交付完成。SPEC §9 四個 sprint 已行完;§10 scope 外項目(實時串流、
 自動落單、沽空/期權、多用戶)按約唔做。
