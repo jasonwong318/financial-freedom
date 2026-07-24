@@ -9,7 +9,7 @@ import pytest
 from app.models import make_session
 from app.importer import import_stockerx_csv
 from app.fifo import rebuild_lots
-from app import metrics, behavior, config, advisor, rules, committee
+from app import metrics, behavior, config, advisor, rules, committee, income, assets
 
 from tests.test_sprint2 import PX_20260710, VAL_DATE
 
@@ -155,6 +155,46 @@ def test_committee_offline_without_key(session, monkeypatch):
     res = committee.convene(session, PX_20260710, [], "測試", api_key=None)
     assert res["ok"] is False and res["error"]        # 冇 key → 唔 call 網,回錯
     assert res["history"] == []                        # 唔會污染 history
+
+
+# ---- 股息逐筆明細:每股派息由持股反推 ----
+def test_dividend_events_per_share(session):
+    from datetime import date as D
+    ev = income.dividend_events(session)
+    assert ev and all({"date", "symbol", "amount_hkd", "per_share_ccy"} <= set(e)
+                      for e in ev)
+    # 合計對數:同 metrics 總股息一致
+    assert sum(e["amount_hkd"] for e in ev) == pytest.approx(242797, abs=5)
+    # 2802.HK 有派息,每股派息應為正數(有持股反推到)
+    h2802 = [e for e in ev if e["symbol"] == "2802.HK" and e["per_share_ccy"]]
+    assert h2802 and all(e["per_share_ccy"] > 0 for e in h2802)
+
+
+def test_shares_held_at(session):
+    from datetime import date as D
+    from app.models import Instrument
+    inst = session.query(Instrument).filter_by(symbol="0941.HK").first()
+    # 開倉(2019-06-21)之後應該持有 ≥ 5000 股(視乎後續買賣)
+    assert income.shares_held_at(session, inst.id, D(2020, 1, 1)) > 0
+
+
+# ---- Syfe 收息:公允價值入 assets_other,收息入 DIV_CASH(出現喺股息) ----
+def test_record_syfe():
+    from datetime import date as D
+    s = make_session()
+    import_stockerx_csv(s, CSV)
+    rebuild_lots(s)
+    assets.record_syfe(s, "收息寶 - Max", 50000, 320, "HKD", D(2026, 3, 31))
+    # 公允價值入咗全資產
+    syfe = [a for a in assets.latest_assets(s, category="syfe")]
+    assert syfe and syfe[0]["value"] == pytest.approx(50000)
+    # 收息入咗股息
+    divs = metrics.dividends_by_symbol(s)
+    assert divs.get("SYFE:收息寶 - Max") == pytest.approx(320)
+    # 同月再記一次(更正)→ 唔會 double count
+    assets.record_syfe(s, "收息寶 - Max", 51000, 350, "HKD", D(2026, 3, 31))
+    divs2 = metrics.dividends_by_symbol(s)
+    assert divs2.get("SYFE:收息寶 - Max") == pytest.approx(350)   # 覆蓋唔累加
 
 
 def test_advisor_context_facts_only(session):

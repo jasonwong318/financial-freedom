@@ -8,11 +8,50 @@
 收息倉排序預設用「含息總回報」(②+ 已實現),呢個係業主明文鐵律。
 """
 from collections import defaultdict
-from datetime import date as Date, timedelta
+from datetime import date as Date, datetime, time, timedelta
 
 from .models import Transaction, Instrument, Lot, LotClosure
-from .config import to_hkd
+from .config import to_hkd, short_name
 from .metrics import open_positions, open_position_pnl, round_trips
+
+
+def shares_held_at(session, instrument_id, on_date: Date) -> float:
+    """某日持有股數(BUY − SELL 淨額,截至當日)。用嚟由股息總額反推每股派息。"""
+    cutoff = datetime.combine(on_date, time.max)
+    rows = (session.query(Transaction)
+            .filter(Transaction.instrument_id == instrument_id,
+                    Transaction.type.in_(("BUY", "SELL")),
+                    Transaction.trade_dt <= cutoff).all())
+    sh = 0.0
+    for t in rows:
+        sh += float(t.qty) if t.type == "BUY" else -float(t.qty)
+    return sh
+
+
+def dividend_events(session):
+    """逐筆股息明細(含每股派息)。回傳 list of dict,按日期排。
+
+    每股派息 = 股息總額(原幣) ÷ 當日持股;冇持股記錄(如 Syfe 基金收息)→ None。
+    """
+    rows = (session.query(Transaction, Instrument)
+            .join(Instrument, Transaction.instrument_id == Instrument.id)
+            .filter(Transaction.type == "DIV_CASH")
+            .order_by(Transaction.trade_dt).all())
+    out = []
+    for t, inst in rows:
+        amt_ccy = float(t.price)
+        sh = shares_held_at(session, inst.id, t.trade_dt.date())
+        out.append({
+            "date": t.trade_dt.date(),
+            "symbol": inst.symbol,
+            "name": short_name(inst.symbol, inst.name),
+            "ccy": t.ccy,
+            "amount_ccy": amt_ccy,
+            "amount_hkd": to_hkd(amt_ccy, t.ccy),
+            "shares": sh if sh > 0 else None,
+            "per_share_ccy": (amt_ccy / sh) if sh > 0 else None,
+        })
+    return out
 
 
 def _earliest_open_dt(session):
