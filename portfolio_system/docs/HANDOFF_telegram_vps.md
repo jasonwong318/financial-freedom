@@ -69,24 +69,121 @@ portfolio.db  ← 同 Streamlit app 共用同一個 DB(持倉/現價/分倉)
 
 ---
 
-## 3. VPS 部署步驟
+## 3. 推薦架構:全部喺 VPS 度跑(app + bot 同一個 DB)
+
+**重點:唔好 app 喺 PC、bot 喺 VPS(咁會兩個 DB 唔同步)。** 正確做法係 Streamlit app
+同 bot **兩樣都喺 Oracle VPS 跑,共用同一個 `portfolio.db`**。好處:
+
+- PC 關機都冇影響(全部喺 VPS 24 小時跑)
+- 喺 app 記完交易/股息,bot 即刻同步(同一部機、同一個 db)—— **唔使手動 update VPS**
+- 你想睇 app 就由 PC 開瀏覽器連上 VPS(見下面安全連法)
+
+觀念澄清:
+- **Python(語言)**:喺 VPS 用 `apt` 裝,唔係喺 GitHub download。
+- **App 的 code**:用 `git clone` 由 GitHub 攞落 VPS。
+- `export ...` 係 **Linux(bash)指令**,喺你 SSH 入咗 VPS 之後打。PowerShell 只係用嚟 SSH 登入。
+
+### 完整流程(由 PC 開始)
+
+```powershell
+# 【喺你 PC 嘅 PowerShell】SSH 登入 Oracle VPS(用你嘅 key + VPS public IP)
+ssh -i C:\path\to\oracle_key.key ubuntu@<VPS_PUBLIC_IP>
+```
 
 ```bash
-# 1) 攞 code
+# 【以下全部喺 VPS 嘅 bash 度打】
+
+# 1) 裝 Python + git(Oracle 通常係 Ubuntu;一次過)
+sudo apt update && sudo apt install -y python3 python3-pip git
+
+# 2) 攞 code(GitHub → VPS)
 git clone https://github.com/jasonwong318/financial-freedom.git
 cd financial-freedom/portfolio_system
-pip install -r requirements.txt        # 或至少:sqlalchemy pandas requests yfinance
+pip3 install -r requirements.txt
 
-# 2) BotFather(Telegram)開 bot 攞 token;攞自己 chat_id(可用 @userinfobot)
+# 3) 環境變數(BotFather 攞 token;@userinfobot 攞 chat_id)
+export TELEGRAM_BOT_TOKEN=123456:AA...
+export TELEGRAM_CHAT_ID=你的chat_id
+export PORTFOLIO_DB_URL=sqlite:////home/ubuntu/financial-freedom/portfolio_system/portfolio.db
+#                        ↑ 四個斜線 = 絕對路徑;app 同 bot 都指呢一個
 
-# 3) 環境變數
-export TELEGRAM_BOT_TOKEN=123456:AA...       # BotFather 俾
-export TELEGRAM_CHAT_ID=你的chat_id          # 選填,只回你自己
-export PORTFOLIO_DB_URL=sqlite:////absolute/path/portfolio.db   # 見下面同步
-
-# 4) 起動
-python -m bot.telegram_bot
+# 4) 起 app(背景長跑)+ bot
+nohup streamlit run ui/app.py --server.address 127.0.0.1 --server.port 8501 &
+python3 -m bot.telegram_bot        # 前景測試;OK 之後改用下面 systemd
 ```
+
+### 之後想 update code(GitHub 有新版本)
+```bash
+cd ~/financial-freedom && git pull      # 就係咁,唔使 download 成個
+sudo systemctl restart committee-bot committee-app   # 有用 systemd 就重啟
+```
+
+### 喺 PC 安全咁睇個 app(唔好公開 8501 落公網!)
+你嘅財務數據唔應該喺公網裸露。用 **SSH tunnel** 最穩陣:
+```powershell
+# 【PC PowerShell】開一條隧道,VPS 嘅 8501 映射到你 PC 嘅 localhost:8501
+ssh -i C:\path\to\oracle_key.key -L 8501:127.0.0.1:8501 ubuntu@<VPS_PUBLIC_IP>
+# 然後 PC 瀏覽器開:http://localhost:8501
+```
+（唔想每次開隧道?可以喺 Oracle security list 只開你屋企 IP + 加登入密碼,但隧道最簡單又最安全。)
+
+### 兩個 systemd service(開機自動 + 崩潰重啟)
+見下面第 3.1 節。
+
+---
+
+## 3.1 systemd 部署細節(app + bot 兩個 service,共用同一個 DB)
+
+先確定共用嘅 DB 絕對路徑,例如 `/home/ubuntu/financial-freedom/portfolio_system/portfolio.db`。
+兩個 service 都指同一個 `PORTFOLIO_DB_URL` → **app 一寫,bot 即刻讀到,零手動同步**。
+
+**Service 1 — Streamlit app** `/etc/systemd/system/committee-app.service`：
+```ini
+[Unit]
+Description=Investment Committee App
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/ubuntu/financial-freedom/portfolio_system
+Environment=PORTFOLIO_DB_URL=sqlite:////home/ubuntu/financial-freedom/portfolio_system/portfolio.db
+ExecStart=/usr/bin/python3 -m streamlit run ui/app.py --server.address 127.0.0.1 --server.port 8501
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Service 2 — Telegram 守門 bot** `/etc/systemd/system/committee-bot.service`：
+```ini
+[Unit]
+Description=Investment Committee Telegram Gate Bot
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/ubuntu/financial-freedom/portfolio_system
+Environment=TELEGRAM_BOT_TOKEN=123456:AA...
+Environment=TELEGRAM_CHAT_ID=你的chat_id
+Environment=PORTFOLIO_DB_URL=sqlite:////home/ubuntu/financial-freedom/portfolio_system/portfolio.db
+ExecStart=/usr/bin/python3 -m bot.telegram_bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now committee-app committee-bot
+journalctl -u committee-bot -f          # 睇 bot log
+```
+
+搞掂之後:兩個 service 24 小時喺 VPS 跑,**PC 閂機都冇影響**。你喺 app 記完交易,
+Telegram 問 bot 就已經係最新倉位。
+
+> 註:SQLite 俾 app + bot 同時讀寫,量少冇問題;將來想更穩就轉 Postgres
+> (`PORTFOLIO_DB_URL=postgresql+psycopg2://...`,見 `docker-compose.yml`)。
 
 ### 用法(直接打俾 bot)
 ```
@@ -97,48 +194,27 @@ python -m bot.telegram_bot
 /help
 ```
 
-### systemd(開機自動 + 崩潰重啟)
-`/etc/systemd/system/committee-bot.service`：
-```ini
-[Unit]
-Description=Investment Committee Telegram Gate Bot
-After=network-online.target
-
-[Service]
-WorkingDirectory=/home/USER/financial-freedom/portfolio_system
-Environment=TELEGRAM_BOT_TOKEN=123456:AA...
-Environment=TELEGRAM_CHAT_ID=你的chat_id
-Environment=PORTFOLIO_DB_URL=sqlite:////home/USER/financial-freedom/portfolio_system/portfolio.db
-ExecStart=/usr/bin/python3 -m bot.telegram_bot
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-```bash
-sudo systemctl enable --now committee-bot
-journalctl -u committee-bot -f      # 睇 log
-```
-
-### ⚠️ DB 同步(要諗)
-Bot 要讀到你**最新持倉**先準。三個選項:
-- **(A) 最簡單**:喺同一部 VPS 都跑 Streamlit app,兩者指同一個 `portfolio.db`。你喺 app 記交易 → bot 即刻同步。
-- **(B) 升級 Postgres**:`PORTFOLIO_DB_URL=postgresql+psycopg2://...`,app 同 bot 都連同一個 DB(最穩,見 `docker-compose.yml`)。
-- **(C) 純本地 app + VPS bot**:要定期 rsync/scp `portfolio.db` 上 VPS(易漏更新,唔建議)。
-
 ---
 
-## 4. 想接 Hermes Agent / 令 bot 更聰明(可選)
+## 4. 接 Hermes Agent(Nous 框架 + 火山引擎 LLM,Oracle VPS)
 
-目前 bot 用正則解析自然語言,夠用但唔算「聰明」。如果想接一個 function-calling LLM(例如 Nous Hermes、或你講嗰個 Hermes Agent runtime),建議**混合架構**:
+我嘅設定:**Hermes(Nous 出嘅 agent 框架)+ 火山引擎 agent plan 做 LLM,跑喺 Oracle Cloud VPS。**
+(順帶:呢個 app 嘅「投資委員會」tab 已經支援火山方舟 base_url `https://ark.cn-beijing.volces.com/api/plan`
++ 模型 `ark-code-latest`,同一條 key/endpoint 可以重用。)
+
+目前 bot 用正則解析自然語言,夠用但唔算「聰明」。想借 Hermes 做更自然嘅前端理解,用**混合架構**:
 
 ```
-用戶自由講嘢 → LLM(Hermes)理解意圖 → 呼叫 tool: check_trade(symbol, side, qty, price)
+用戶自由講嘢 → Hermes(火山 LLM)理解意圖 → 呼叫 tool: check_trade(symbol, side, qty, price)
                                               │
                                               ▼
                                      app/rules.check_trade()  ← 確定性 gate,最終真相
 ```
+
+- Hermes 只負責**理解語言 + 對話**;**得唔得永遠由確定性規則話事**(唔可以俾 LLM 亂放行)。
+- 接法:把 `bot/agent.py` 嘅 `evaluate(session, prices, intent)` 同 `portfolio_status(session)`
+  包成 Hermes 嘅兩個 tool/function。Hermes 解析用戶句子 → 填 `intent` → 呼叫 `evaluate` → 回覆。
+- 兩個 tool 都係純 Python、讀同一個 `portfolio.db`,冇額外狀態,好易接。
 
 - LLM 只負責**理解語言 + 對話**;**最終得唔得由確定性規則話事**(唔可以俾 LLM 亂放行)。
 - 要接嘅話,把 `bot/agent.py` 的 `evaluate()` / `portfolio_status()` 包成該 agent 框架嘅一個 tool/function 即可。
@@ -148,9 +224,10 @@ Bot 要讀到你**最新持倉**先準。三個選項:
 
 ## 5. 想 Claude(chat)幫你做嘅嘢(建議清單)
 
-1. 幫我喺 VPS(邊間?e.g. DigitalOcean/Vultr）行第 3 節步驟,包 systemd。
-2. DB 同步用邊個方案(A/B/C)最啱我?
-3. 我個 Hermes Agent 係 ___(貼 link),幫我把 `agent.evaluate()` 接做佢一個 tool。
+1. 幫我喺 **Oracle Cloud VPS** 行第 3 節步驟(app + bot 兩個 systemd service,共用一個 DB)。
+2. 幫我設好 **SSH tunnel**,喺 PC 安全咁開 `http://localhost:8501` 睇 app。
+3. 我用 **Hermes(Nous)+ 火山引擎 agent plan**,幫我把 `bot/agent.py` 嘅
+   `evaluate()` / `portfolio_status()` 包成 Hermes 兩個 tool(見第 4 節)。
 4. (可選)加每日早晨自動推送 `/status`。
 
 ---
