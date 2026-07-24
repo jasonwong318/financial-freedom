@@ -95,17 +95,17 @@ def parse_trade(text: str):
         if m:
             amount = _to_number(m.group(1))
 
-    # 股數:「X 股」或者一個淨數字(唔係價、唔係金額)
+    # 股數:「X 股」或者一個淨數字。先移走 @價 部分,免 78.75 被拆成 78/75。
     qty = None
     m = re.search(r"([\d,.]+)\s*股", t)
     if m:
         qty = _to_number(m.group(1))
     if qty is None and amount is None:
-        # 攞唔係緊跟 @ 嘅第一個純數字做股數
-        nums = re.findall(r"(?<![@$])\b(\d[\d,]*)\b", t)
-        cand = [n for n in nums if _to_number(n) not in (price,)]
-        if cand:
-            qty = _to_number(cand[-1])
+        t_wo = re.sub(r"@\s*[\d,.]+", "", t)         # 去走 @價
+        t_wo = re.sub(r"(?:用|使|\$)\s*[\d,.]+\s*[萬万kKmM]?", "", t_wo)  # 去走金額
+        nums = re.findall(r"\d[\d,]*(?:\.\d+)?", t_wo)
+        if nums:
+            qty = _to_number(nums[-1])
 
     return {"side": side, "symbol": sym, "price": price, "qty": qty,
             "amount": amount}
