@@ -62,11 +62,10 @@ def test_dual_track_win_rate(session):
     assert "XYZ" in w["open_losers"] and "TSLA" in w["open_winners"]
 
 
-# ---- 歷史重掃:領展手續費事件 + TSLA 沽完高追 必須捕捉到 ----
+# ---- 歷史重掃:TSLA 沽完高追 + 溝貨 必須捕捉到 ----
 def test_scan_history_real_data(session):
     vs = rules.scan_history(session)
-    fee = [v for v in vs if v["rule"] == "FEE_CHECK"]
-    assert [v["symbol"] for v in fee] == ["0823.HK"]        # 得一單:領展 2019
+    assert not [v for v in vs if v["rule"] == "FEE_CHECK"]  # FEE_CHECK 已移除
     rebuy = [v for v in vs if v["rule"] == "REBUY_HIGHER"]
     assert any(v["symbol"] == "TSLA" for v in rebuy)        # 2021-02 沽 153 追 290
     avg = [v for v in vs if v["rule"] == "AVG_DOWN_LIMIT"]
@@ -97,12 +96,11 @@ def test_scan_portfolio_real_data(session):
     assert any(v["rule"] == "CASH_BUFFER_RULE" for v in vs)  # 未有現金數據
 
 
-# ---- 違規成本:FEE_CHECK 0823 結果必須等於該回合已實現 −1,003 ----
+# ---- 違規成本:AVG_DOWN + REBUY_HIGHER 嘅負結果合計 ----
 def test_violation_outcomes(session):
     outs, cost = behavior.violation_outcomes(session, PX_20260710)
-    fee = [o for o in outs if o["rule"] == "FEE_CHECK"][0]
-    assert fee["outcome_hkd"] == pytest.approx(-1003, abs=1)
-    assert cost == pytest.approx(155257, abs=50)            # regression 釘死
+    assert cost == pytest.approx(154254, abs=50)            # regression 釘死(冇 FEE_CHECK)
+    assert {o["rule"] for o in outs} <= {"AVG_DOWN_LIMIT", "REBUY_HIGHER"}
     assert all("outcome_hkd" in o for o in outs)
 
 
@@ -199,16 +197,6 @@ def test_check_trade_chase_high_synthetic():
     vs = rules.check_trade(s, {"DDD.HK": 90.0}, symbol="DDD.HK", side="BUY",
                            price=90.0, qty=10, trade_dt=datetime(2026, 1, 22))
     assert not any(v["rule"] == "CHASE_HIGH" for v in vs)
-
-
-# ---- Pre-trade 合成:FEE_CHECK 沽出前警示(領展情境重演) ----
-def test_check_trade_fee_check_synthetic():
-    s = _synthetic([(datetime(2019, 11, 26), "0823.HK", "BUY", 82.0, 5000,
-                     749.07, "HKD")])
-    vs = rules.check_trade(s, {"0823.HK": 82.1}, symbol="0823.HK", side="SELL",
-                           price=82.1, qty=5000, fee=754.08)
-    fee = [v for v in vs if v["rule"] == "FEE_CHECK"]
-    assert fee and fee[0]["gross_ccy"] == pytest.approx(500, abs=1)
 
 
 # ---- 全資產:四區塊 + 淨資產(Percento 式) ----

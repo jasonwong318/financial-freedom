@@ -143,6 +143,15 @@ docker compose up --build            # UI:8501 · API:8000 · Postgres:5432
 - 註:規則只提示/攔截,唔自動落單(SPEC scope);「強制」= 標紅+彈警示,最後 click 你自己㩒
 - 測試 61 → 66 條全綠
 
+## v6:移除 FEE_CHECK + Telegram 交易守門 bot
+- 移除 FEE_CHECK(業主決定唔理手續費);規則回到 12 條,seed_rules 自動清走舊 DB 嘅 FEE_CHECK
+- STOP_LOSS 措辭由「必須執行」改「止蝕提醒(建議處理)」—— 規則只提醒,唔自動落單
+- `bot/agent.py` + `bot/telegram_bot.py`:交易守門 bot,重用 12 條分倉守則。
+  交易前 Telegram send「買 TSLA 100 @ 407」/「用 5萬 買 中移動」,即場回覆得唔得 +
+  邊條規則有問題;`/status` 回倉位配置 + 現時提示。純 requests 長輪詢,VPS 一句起動:
+  `export TELEGRAM_BOT_TOKEN=... ; export PORTFOLIO_DB_URL=... ; python -m bot.telegram_bot`
+- 測試 65 → 73 條全綠(bot 核心 8 條離線測試)
+
 ## 里程碑狀態
 Sprint 1-4 全部交付完成。SPEC §9 四個 sprint 已行完;§10 scope 外項目(實時串流、
 自動落單、沽空/期權、多用戶)按約唔做。

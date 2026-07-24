@@ -32,8 +32,8 @@ DEFAULT_RULES = {
     "NEW_FOMO_CAP":           {"monthly_pct": 2, "total_pct": 10},
     "CASH_BUFFER_RULE":       {"min_pct": 5},
     "QUARTERLY_REBALANCE":    {},
-    "FEE_CHECK":              {"mult": 3},         # 保留:領展手續費事件
 }
+# 已移除:FEE_CHECK(業主決定唔理手續費——粒數 immaterial、少記錄、券商已平)
 
 
 def rule_requirement(code: str, params: dict) -> str:
@@ -71,10 +71,8 @@ def rule_requirement(code: str, params: dict) -> str:
             return (f"任何時候維持 ≥{p['min_pct']}% 現金;沽出資金先補足現金緩衝"
                     "再買新標的")
         if code == "QUARTERLY_REBALANCE":
-            return ("每季尾強制再平衡:超權重減到上限、處理 STALE/止蝕標的、"
+            return ("每季尾提示再平衡:超權重減到上限、處理 STALE/止蝕標的、"
                     "回收資金按目標權重補地基/被動倉")
-        if code == "FEE_CHECK":
-            return f"預期毛利要 ≥{p['mult']} 倍來回手續費先值得做"
     except KeyError:
         pass
     return str(p)
@@ -90,6 +88,10 @@ def seed_rules(session):
             session.add(Rule(code=code, params=params, enabled=True))
         elif code in resync and existing[code].params != params:
             existing[code].params = params      # 升級到分倉框架
+    # 清走已淘汰嘅規則(FEE_CHECK)
+    for code in ("FEE_CHECK",):
+        if code in existing:
+            session.delete(existing[code])
     session.commit()
 
 
@@ -253,19 +255,7 @@ def check_trade(session, prices, *, symbol, side, price, qty, fee=0.0,
                                   f"低過 {r['min_pct']}% 緩衝 — 先留返現金",
                                   cash_pct_after=round(after_cash / total_assets * 100, 1)))
 
-    else:  # SELL
-        # FEE_CHECK:預期毛利 < mult × 來回手續費(領展事件)
-        r = rules.get("FEE_CHECK")
-        p = pos.get(symbol)
-        if r and p:
-            gross, buy_fees = _fifo_preview(session, symbol, price, qty)
-            fees = buy_fees + fee
-            if fees > 0 and gross < r["mult"] * fees:
-                out.append(_v("FEE_CHECK", symbol,
-                              f"預期毛利 HKD {to_hkd(gross, ccy):,.0f} 不足來回手續費 "
-                              f"HKD {to_hkd(fees, ccy):,.0f} 嘅 {r['mult']} 倍",
-                              gross_ccy=round(gross, 2), fees_ccy=round(fees, 2)))
-
+    # SELL:目前冇 pre-trade 沽出規則(FEE_CHECK 已移除)
     return out
 
 
@@ -403,7 +393,7 @@ def scan_portfolio(session, prices, on_date: Date = None):
                 continue                        # 被動收入倉唔止蝕
             if v["unreal_pct"] * 100 <= -th:
                 forced = meta.get("force_stop")
-                act = "強制止蝕(必須執行)" if forced else "檢討"
+                act = "止蝕提醒(建議處理,唔好深套)" if forced else "檢討"
                 out.append(_v("STOP_LOSS_ALERT", sym,
                               f"{bk.short_name(sym)}({sym})浮虧 "
                               f"{abs(v['unreal_pct'])*100:.0f}% 穿 {meta.get('name', b)} "
@@ -497,34 +487,10 @@ def _satellite_new_this_month(session, ref_dt):
 
 def scan_history(session):
     """全量重掃歷史交易 — 只掃齋靠交易記錄就判到嘅規則:
-    FEE_CHECK(回合毛利 vs 手續費)/ REBUY_HIGHER / AVG_DOWN_LIMIT。
-    (權重類規則要歷史股價先判到,唔喺呢度靠估。)
+    REBUY_HIGHER / AVG_DOWN_LIMIT。(權重類規則要歷史股價先判到,唔喺呢度靠估。)
     """
     rules = enabled_rules(session)
     out = []
-
-    # FEE_CHECK:逐個已完成回合對數
-    r = rules.get("FEE_CHECK")
-    if r:
-        per_sell = {}
-        rows = (session.query(LotClosure, Lot, Transaction, Instrument)
-                .join(Lot, LotClosure.lot_id == Lot.id)
-                .join(Transaction, LotClosure.close_txn_id == Transaction.id)
-                .join(Instrument, Lot.instrument_id == Instrument.id).all())
-        for cl, lot, sell, inst in rows:
-            a = per_sell.setdefault(sell.id, {
-                "symbol": inst.symbol, "ccy": inst.ccy, "dt": sell.trade_dt,
-                "gross": 0.0, "fees": float(sell.fee or 0)})
-            a["gross"] += (float(sell.price) - float(lot.open_price)) * float(cl.qty)
-            a["fees"] += float(lot.fee_per_share or 0) * float(cl.qty)
-        for sid, a in per_sell.items():
-            if a["fees"] > 0 and a["gross"] < r["mult"] * a["fees"]:
-                out.append(_v("FEE_CHECK", a["symbol"],
-                              f"{a['dt'].date()} {a['symbol']} 回合毛利 "
-                              f"{a['gross']:,.0f}({a['ccy']})不足手續費 "
-                              f"{a['fees']:,.0f} 嘅 {r['mult']} 倍",
-                              txn_id=sid, gross_ccy=round(a["gross"], 2),
-                              fees_ccy=round(a["fees"], 2)))
 
     # REBUY_HIGHER + AVG_DOWN_LIMIT:按時序 replay
     r_rebuy = rules.get("REBUY_HIGHER")

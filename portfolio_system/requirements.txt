@@ -13,6 +13,8 @@ python-multipart>=0.0.9   # /import/csv 檔案上載
 httpx>=0.27               # TestClient
 # AI 顧問(§7 /advisor,選用;冇 key 會離線降級):
 anthropic>=0.40
+# Telegram 交易守門 bot(bot/,選用):
+requests>=2.31
 # 正式部署:
 psycopg2-binary>=2.9      # PostgreSQL driver
 # 待做:alembic(migration)
