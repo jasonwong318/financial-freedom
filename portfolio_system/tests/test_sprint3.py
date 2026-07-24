@@ -73,16 +73,28 @@ def test_scan_history_real_data(session):
     assert any(v["symbol"] == "TSLA" for v in avg)          # 2025 年溝足 8 次
 
 
-# ---- 狀態掃描:TSLA 集中度 + XYZ/GME 死揸 ----
+# ---- 狀態掃描:分倉單一/合計上限 + XYZ/GME 死揸(核心豁免) ----
 def test_scan_portfolio_real_data(session):
     vs = rules.scan_portfolio(session, PX_20260710, VAL_DATE)
     w = [v for v in vs if v["rule"] == "MAX_POSITION_WEIGHT"]
-    assert [v["symbol"] for v in w] == ["TSLA"]
-    assert w[0]["weight_pct"] == pytest.approx(50.8, abs=0.3)
+    wsyms = {v["symbol"] for v in w}
+    assert "TSLA" in wsyms                                  # 核心單一 >40%
+    assert "_sleeve_core" in wsyms                          # 核心 sleeve >50%
+    assert "_sleeve_satellite" in wsyms                     # 衛星 sleeve >10%
+    tsla = [v for v in w if v["symbol"] == "TSLA"][0]
+    assert tsla["weight_pct"] == pytest.approx(50.8, abs=0.3)
+    assert tsla["limit_pct"] == 40 and tsla["bucket"] == "core"
+    # STALE_LOSER:非核心死揸(XYZ/GME 都係衛星),核心 TSLA 唔會出現
     stale = {v["symbol"] for v in vs if v["rule"] == "STALE_LOSER"}
-    assert {"XYZ", "GME"} <= stale                          # 死揸實錘
-    stop = {v["symbol"] for v in vs if v["rule"] == "STOP_LOSS_ALERT"}
-    assert "XYZ" in stop and "NVTS" in stop
+    assert {"XYZ", "GME"} <= stale and "TSLA" not in stale
+    # 衛星倉 −20% 強制止蝕
+    stop = [v for v in vs if v["rule"] == "STOP_LOSS_ALERT"]
+    stopsyms = {v["symbol"] for v in stop}
+    assert "XYZ" in stopsyms and "NVTS" in stopsyms
+    assert all(v["forced"] for v in stop if v["bucket"] == "satellite")
+    # 新框架三條新規則
+    assert any(v["rule"] == "NEW_FOMO_CAP" for v in vs)     # 衛星 29% >10%
+    assert any(v["rule"] == "CASH_BUFFER_RULE" for v in vs)  # 未有現金數據
 
 
 # ---- 違規成本:FEE_CHECK 0823 結果必須等於該回合已實現 −1,003 ----

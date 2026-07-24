@@ -41,6 +41,32 @@ SECTOR_MAP = {
     "3416.HK": "高息收租", "3466.HK": "高息收租", "0823.HK": "高息收租",
 }
 
+# ---- 四大倉位(sleeve)分類 + 分層紀律(業主 2026 策略框架) ----
+# single_max:單一標的市值佔全組合上限(%);sleeve_max/min:整個倉位佔比上下限(%)
+# stop_pct:止蝕/檢討線(%,正數代表跌幅);force_stop:True = 強制止蝕(否則只檢討)
+BUCKETS = {
+    "core":       {"name": "核心信仰倉", "single_max": 40, "sleeve_max": 50,
+                   "sleeve_min": None, "stop_pct": 30, "force_stop": False,
+                   "desc": "非常了解、長線堅定、穿越週期;寬鬆紀律,豁免大部分 FOMO 規則"},
+    "foundation": {"name": "地基股息倉", "single_max": 20, "sleeve_max": 30,
+                   "sleeve_min": 20, "stop_pct": 20, "force_stop": False,
+                   "desc": "低估值高息、現金流穩定、成本低;組合安全墊"},
+    "passive":    {"name": "長期被動收入倉", "single_max": None, "sleeve_max": 25,
+                   "sleeve_min": 15, "stop_pct": None, "force_stop": False,
+                   "desc": "ETF/高息/covered call,月供長揸,20 年被動現金流;唔止蝕"},
+    "satellite":  {"name": "衛星/FOMO投機倉", "single_max": 5, "sleeve_max": 10,
+                   "sleeve_min": None, "stop_pct": 20, "force_stop": True,
+                   "desc": "短期題材/FOMO,原本短炒;最嚴格紀律,-20% 強制全賣"},
+}
+BUCKET_ORDER = ["core", "foundation", "passive", "satellite"]
+DEFAULT_BUCKET = "satellite"        # 其他全放衛星倉(業主指示)
+BUCKET_MAP = {                       # 預設分倉(可喺 UI 改,存 instrument_buckets 表)
+    "TSLA": "core",
+    "0941.HK": "foundation", "0883.HK": "foundation",
+    "VOO": "passive", "2802.HK": "passive", "3416.HK": "passive", "3466.HK": "passive",
+}
+
+
 # 中文簡稱(UI 顯示用;唔影響任何計算)。查唔到就 fallback 去 instrument.name / symbol。
 NAME_MAP = {
     "0001.HK": "長和", "0011.HK": "恒生銀行", "0175.HK": "吉利汽車",

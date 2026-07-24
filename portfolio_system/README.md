@@ -126,6 +126,23 @@ docker compose up --build            # UI:8501 · API:8000 · Postgres:5432
 - 報表頁:加「逐年回報」表(易睇),月度熱力圖同回撤加清楚說明
 - 測試 58 → 61 條全綠
 
+## v5:四大倉位分類 + 分層行為紀律(12+1 規則)
+- `app/buckets.py` + `config.BUCKETS`:核心信仰倉 / 地基股息倉 / 長期被動收入倉 /
+  衛星FOMO投機倉,各有 single_max / sleeve_max / stop_pct / force_stop。
+  分倉解析:instrument_buckets 表(用戶改) > config.BUCKET_MAP(預設) > 衛星。
+  預設:TSLA=核心、中移/中油=地基、VOO/2802/3416/3466=被動、其餘=衛星。
+- 規則引擎升級(rules.py,13 條 = 業主 12 條 + 保留 FEE_CHECK):
+  - MAX_POSITION_WEIGHT:分層單一上限(核心40/地基20/衛星5)+ sleeve 合計上限
+  - STALE_LOSER:非核心蝕>20%又揸>180日 → 強制賣一半(核心豁免)
+  - STOP_LOSS_ALERT:衛星−20%強制止蝕 / 核心地基−30%檢討 / 被動免
+  - 新增 NEW_FOMO_CAP(每月新增≤2%、總衛星≤10%)、CASH_BUFFER_RULE(≥5%現金)、
+    QUARTERLY_REBALANCE(季尾再平衡)
+  - seed_rules 自動把舊版 3 條結構規則升級到分倉框架
+- UI:總覽加「四大倉位配置」panel(sleeve 權重 vs 目標,超標紅/未達下限黃);
+  持倉加「倉位」欄 + 「調整分倉」編輯器;新增交易頁規則清單自動顯示 13 條實際要求
+- 註:規則只提示/攔截,唔自動落單(SPEC scope);「強制」= 標紅+彈警示,最後 click 你自己㩒
+- 測試 61 → 66 條全綠
+
 ## 里程碑狀態
 Sprint 1-4 全部交付完成。SPEC §9 四個 sprint 已行完;§10 scope 外項目(實時串流、
 自動落單、沽空/期權、多用戶)按約唔做。

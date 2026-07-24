@@ -137,6 +137,13 @@ class RuleViolation(Base):
     rule = relationship("Rule")
 
 
+class InstrumentBucket(Base):
+    """個股 → 四大倉位分類嘅覆寫(config.BUCKET_MAP 係預設,呢度存用戶改動)。"""
+    __tablename__ = "instrument_buckets"
+    symbol = Column(Text, primary_key=True)
+    bucket = Column(Text, nullable=False)
+
+
 def make_session(url: str = "sqlite:///:memory:"):
     """開發用 SQLite;正式版換 postgresql:// URL 即可。
 

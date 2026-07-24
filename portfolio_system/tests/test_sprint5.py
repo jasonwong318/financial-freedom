@@ -9,7 +9,8 @@ import pytest
 from app.models import make_session
 from app.importer import import_stockerx_csv
 from app.fifo import rebuild_lots
-from app import metrics, behavior, config, advisor, rules, committee, income, assets
+from app import (metrics, behavior, config, advisor, rules, committee, income,
+                 assets, buckets)
 
 from tests.test_sprint2 import PX_20260710, VAL_DATE
 
@@ -80,13 +81,15 @@ def test_advisor_offline_no_key(session, monkeypatch):
     assert "TSLA" in res["context"]["position_weights"]
 
 
-# ---- 十條規則實際要求(UI 顯示用):渲染出具體數字 ----
+# ---- 規則實際要求(UI 顯示用):渲染出具體數字 ----
 def test_rule_requirement_concrete():
     req = rules.rule_requirement("AVG_DOWN_LIMIT",
                                  {"n": 2, "min_drop_pct": 15, "max_size_pct": 50})
     assert "2 次" in req and "15%" in req and "50%" in req
-    assert "15%" in rules.rule_requirement("MAX_POSITION_WEIGHT", {"pct": 15})
-    # 全部十條都渲染到句子(唔會 raise、唔會回空)
+    # MAX_POSITION_WEIGHT 而家分層:核心 40 / 地基 20 / 衛星 5
+    mpw = rules.rule_requirement("MAX_POSITION_WEIGHT", {"tiered": True})
+    assert "40%" in mpw and "5%" in mpw
+    # 全部規則都渲染到句子(唔會 raise、唔會回空)
     for code, params in rules.DEFAULT_RULES.items():
         s = rules.rule_requirement(code, params)
         assert isinstance(s, str) and len(s) > 4
@@ -195,6 +198,66 @@ def test_record_syfe():
     assets.record_syfe(s, "收息寶 - Max", 51000, 350, "HKD", D(2026, 3, 31))
     divs2 = metrics.dividends_by_symbol(s)
     assert divs2.get("SYFE:收息寶 - Max") == pytest.approx(350)   # 覆蓋唔累加
+
+
+# ---- 四大倉位分類 + sleeve 權重 ----
+def test_bucket_classification(session):
+    assert buckets.bucket_of(session, "TSLA") == "core"
+    assert buckets.bucket_of(session, "0941.HK") == "foundation"
+    assert buckets.bucket_of(session, "VOO") == "passive"
+    assert buckets.bucket_of(session, "XYZ") == "satellite"    # 預設衛星
+    # 用戶覆寫
+    buckets.set_bucket(session, "XYZ", "core")
+    assert buckets.bucket_of(session, "XYZ") == "core"
+    buckets.set_bucket(session, "XYZ", "satellite")            # 改返
+
+
+def test_sleeve_weights(session):
+    sw = buckets.sleeve_weights(session, PX_20260710)
+    sl = sw["sleeves"]
+    assert sl["core"]["weight_pct"] == pytest.approx(50.8, abs=0.3)
+    assert sl["core"]["over"] is True                          # >50%
+    assert sl["satellite"]["over"] is True                     # 29% > 10%
+    # TSLA 單一超核心 40%
+    tsla = [h for h in sl["core"]["holdings"] if h["symbol"] == "TSLA"][0]
+    assert tsla["single_over"] is True
+
+
+def test_twelve_rules_seeded(session):
+    codes = set(rules.enabled_rules(session))
+    for c in ("NEW_FOMO_CAP", "CASH_BUFFER_RULE", "QUARTERLY_REBALANCE"):
+        assert c in codes                                      # 3 條新規則
+    # MAX_POSITION_WEIGHT 已升級做 tiered
+    assert rules.enabled_rules(session)["MAX_POSITION_WEIGHT"].get("tiered")
+
+
+def test_check_trade_bucket_aware(session):
+    # 買核心 TSLA:單一上限係 40%(唔係舊 15%)
+    vs = rules.check_trade(session, PX_20260710, symbol="TSLA", side="BUY",
+                           price=407.76, qty=100, total_assets=6_000_000)
+    mpw = [v for v in vs if v["rule"] == "MAX_POSITION_WEIGHT"]
+    assert mpw and mpw[0]["limit_pct"] == 40 and mpw[0]["bucket"] == "core"
+    # 買衛星股加碼:NEW_FOMO_CAP 應該彈(衛星已 29% > 10%)
+    vs = rules.check_trade(session, PX_20260710, symbol="LITE", side="BUY",
+                           price=802, qty=10, total_assets=6_000_000)
+    assert any(v["rule"] == "NEW_FOMO_CAP" for v in vs)
+
+
+def test_cash_buffer_with_data():
+    from datetime import date as D
+    s = make_session()
+    import_stockerx_csv(s, CSV)
+    rebuild_lots(s)
+    rules.seed_rules(s)
+    # 冇現金數據 → 提示要更新
+    vs = rules.scan_portfolio(s, PX_20260710, VAL_DATE)
+    cb = [v for v in vs if v["rule"] == "CASH_BUFFER_RULE"]
+    assert cb and cb[0]["cash_pct"] is None
+    # 加少量現金(<5%)→ 應該彈緩衝不足
+    assets.upsert_asset(s, "cash", "Citibank", "HKD", 10000, D(2026, 7, 1))
+    vs = rules.scan_portfolio(s, PX_20260710, VAL_DATE)
+    cb = [v for v in vs if v["rule"] == "CASH_BUFFER_RULE"]
+    assert cb and cb[0]["cash_pct"] is not None and cb[0]["cash_pct"] < 5
 
 
 def test_advisor_context_facts_only(session):

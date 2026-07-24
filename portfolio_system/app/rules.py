@@ -13,21 +13,26 @@ from collections import defaultdict
 
 from .models import (Rule, RuleViolation, Transaction, Lot, LotClosure,
                      Instrument)
-from .config import to_hkd
+from .config import to_hkd, BUCKETS
 from .metrics import open_positions, open_position_pnl
+from . import buckets as bk
 
-# 規格書 §4 十條規則嘅預設參數 — 可喺 rules 表逐條改
+# 行為規則預設參數(業主 2026 分倉框架,12 條 + 保留 FEE_CHECK)。可喺 rules 表逐條改。
+# tiered=True 嘅規則按四大倉位(config.BUCKETS)分層,唔用單一 pct。
 DEFAULT_RULES = {
-    "MAX_POSITION_WEIGHT":    {"pct": 15},
+    "MAX_POSITION_WEIGHT":    {"tiered": True},   # 核心40/地基20/衛星5(sleeve 合計亦查)
     "MAX_SECTOR_WEIGHT":      {"pct": 40},
     "MAX_SINGLE_ENTRY":       {"pct": 5},
     "AVG_DOWN_LIMIT":         {"n": 2, "min_drop_pct": 15, "max_size_pct": 50},
     "CHASE_HIGH":             {"pct": 3},
-    "STALE_LOSER":            {"loss_pct": 10, "days": 180},
-    "STOP_LOSS_ALERT":        {"satellite": 15, "spec": 20},
+    "STALE_LOSER":            {"loss_pct": 20, "days": 180, "force_sell_half": True},
+    "STOP_LOSS_ALERT":        {"tiered": True},   # 衛星-20強制/核心地基-30檢討/被動免
     "WEEKLY_CIRCUIT_BREAKER": {"pct": 2, "cooloff_days": 5},
-    "FEE_CHECK":              {"mult": 3},
     "REBUY_HIGHER":           {"days": 90, "pct": 10},
+    "NEW_FOMO_CAP":           {"monthly_pct": 2, "total_pct": 10},
+    "CASH_BUFFER_RULE":       {"min_pct": 5},
+    "QUARTERLY_REBALANCE":    {},
+    "FEE_CHECK":              {"mult": 3},         # 保留:領展手續費事件
 }
 
 
@@ -36,7 +41,8 @@ def rule_requirement(code: str, params: dict) -> str:
     p = params or {}
     try:
         if code == "MAX_POSITION_WEIGHT":
-            return f"單一標的市值唔可以超過組合 {p['pct']}%"
+            return ("分層單一標的上限:核心信仰倉 ≤40%、地基股息倉 ≤20%、"
+                    "衛星投機倉 ≤5%(sleeve 合計亦有上限)")
         if code == "MAX_SECTOR_WEIGHT":
             return f"同一板塊合計市值唔可以超過組合 {p['pct']}%"
         if code == "MAX_SINGLE_ENTRY":
@@ -47,27 +53,43 @@ def rule_requirement(code: str, params: dict) -> str:
         if code == "CHASE_HIGH":
             return f"買入價唔可以喺 20 日高位 {p['pct']}% 之內(避免高追)"
         if code == "STALE_LOSER":
-            return f"帳面蝕 >{p['loss_pct']}% 又揸超過 {p['days']} 日 → 強制檢討"
+            tail = "→ 強制賣出一半、餘下檢討" if p.get("force_sell_half") else "→ 強制檢討"
+            return (f"非核心倉:帳面蝕 >{p['loss_pct']}% 又揸超過 {p['days']} 日 "
+                    f"{tail}(核心信仰倉豁免)")
         if code == "STOP_LOSS_ALERT":
-            return f"衛星倉浮虧穿 −{p['satellite']}%(投機倉 −{p['spec']}%)發止蝕提示"
+            return ("分層止蝕:衛星投機倉 −20% 強制止蝕;核心/地基倉 −30% 檢討;"
+                    "被動收入倉唔止蝕")
         if code == "WEEKLY_CIRCUIT_BREAKER":
             return (f"一週已實現虧損超過總資產 {p['pct']}% → 建議停新倉 "
                     f"{p['cooloff_days']} 個交易日")
-        if code == "FEE_CHECK":
-            return f"預期毛利要 ≥{p['mult']} 倍來回手續費先值得做"
         if code == "REBUY_HIGHER":
             return f"沽出後 {p['days']} 日內唔好以高 >{p['pct']}% 價買返同一隻"
+        if code == "NEW_FOMO_CAP":
+            return (f"每月新增投機倉 ≤總資產 {p['monthly_pct']}%;"
+                    f"整個投機倉合計 ≤{p['total_pct']}%")
+        if code == "CASH_BUFFER_RULE":
+            return (f"任何時候維持 ≥{p['min_pct']}% 現金;沽出資金先補足現金緩衝"
+                    "再買新標的")
+        if code == "QUARTERLY_REBALANCE":
+            return ("每季尾強制再平衡:超權重減到上限、處理 STALE/止蝕標的、"
+                    "回收資金按目標權重補地基/被動倉")
+        if code == "FEE_CHECK":
+            return f"預期毛利要 ≥{p['mult']} 倍來回手續費先值得做"
     except KeyError:
         pass
     return str(p)
 
 
 def seed_rules(session):
-    """預設十條規則入庫(冪等:已存在嘅唔郁,保留業主改過嘅參數)。"""
-    existing = {r.code for r in session.query(Rule).all()}
+    """規則入庫(冪等)。新規則自動加;呢幾條由舊版(單一 pct)升級到分倉框架,
+    強制同步 params,其餘保留用戶改過嘅參數。"""
+    resync = {"MAX_POSITION_WEIGHT", "STOP_LOSS_ALERT", "STALE_LOSER"}
+    existing = {r.code: r for r in session.query(Rule).all()}
     for code, params in DEFAULT_RULES.items():
         if code not in existing:
             session.add(Rule(code=code, params=params, enabled=True))
+        elif code in resync and existing[code].params != params:
+            existing[code].params = params      # 升級到分倉框架
     session.commit()
 
 
@@ -109,14 +131,19 @@ def check_trade(session, prices, *, symbol, side, price, qty, fee=0.0,
     out = []
 
     if side == "BUY":
-        # MAX_POSITION_WEIGHT:買入後單一標的權重超標
+        b = bk.bucket_of(session, symbol)
+        bmeta = BUCKETS.get(b, {})
+        # MAX_POSITION_WEIGHT:買入後按倉位單一上限(核心40/地基20/衛星5)
         r = rules.get("MAX_POSITION_WEIGHT")
         if r and nav:
-            w = (mv.get(symbol, 0) + amt_hkd) / (nav + amt_hkd) * 100
-            if w > r["pct"]:
-                out.append(_v("MAX_POSITION_WEIGHT", symbol,
-                              f"買入後 {symbol} 佔組合 {w:.1f}%,超過上限 {r['pct']}%",
-                              weight_pct=round(w, 1), limit_pct=r["pct"]))
+            smax = bmeta.get("single_max")
+            if smax is not None:
+                w = (mv.get(symbol, 0) + amt_hkd) / (nav + amt_hkd) * 100
+                if w > smax:
+                    out.append(_v("MAX_POSITION_WEIGHT", symbol,
+                                  f"買入後 {symbol} 佔組合 {w:.1f}%,超過"
+                                  f"{bmeta.get('name', b)}單一上限 {smax}%",
+                                  weight_pct=round(w, 1), limit_pct=smax, bucket=b))
 
         # MAX_SECTOR_WEIGHT:板塊合計超標(標的要有 sector 標籤先計到)
         r = rules.get("MAX_SECTOR_WEIGHT")
@@ -195,6 +222,36 @@ def check_trade(session, prices, *, symbol, side, price, qty, fee=0.0,
                               f"{r['pct']}% — 建議停新倉 {r['cooloff_days']} 個交易日",
                               week_realized_hkd=round(wk),
                               cooloff_days=r["cooloff_days"]))
+
+        # NEW_FOMO_CAP:買衛星/投機倉 → 月度新增 + 總量上限
+        r = rules.get("NEW_FOMO_CAP")
+        if r and total and b == "satellite":
+            sw = bk.sleeve_weights(session, prices)
+            cur = sw["sleeves"].get("satellite", {}).get("weight_pct", 0)
+            after = (cur * total / 100 + amt_hkd) / (total) * 100 if total else 0
+            if after > r["total_pct"]:
+                out.append(_v("NEW_FOMO_CAP", symbol,
+                              f"買入後衛星/投機倉合計 {after:.1f}%,超過總量上限 "
+                              f"{r['total_pct']}% — 唔好再加 FOMO",
+                              weight_pct=round(after, 1), limit_pct=r["total_pct"]))
+            month_new = _satellite_new_this_month(session, trade_dt) + amt_hkd
+            if month_new / total * 100 > r["monthly_pct"]:
+                out.append(_v("NEW_FOMO_CAP", symbol,
+                              f"本月新增投機倉 HKD {month_new:,.0f} 佔 "
+                              f"{month_new/total*100:.1f}%,超過每月上限 {r['monthly_pct']}%",
+                              monthly_pct=round(month_new / total * 100, 1)))
+
+        # CASH_BUFFER_RULE:買入後現金會唔會跌穿 5% 緩衝
+        r = rules.get("CASH_BUFFER_RULE")
+        if r:
+            cash, total_assets = _cash_and_total(session, prices)
+            if cash is not None and total_assets > 0:
+                after_cash = cash - amt_hkd
+                if after_cash / total_assets * 100 < r["min_pct"]:
+                    out.append(_v("CASH_BUFFER_RULE", symbol,
+                                  f"買入後現金剩 {after_cash/total_assets*100:.1f}%,"
+                                  f"低過 {r['min_pct']}% 緩衝 — 先留返現金",
+                                  cash_pct_after=round(after_cash / total_assets * 100, 1)))
 
     else:  # SELL
         # FEE_CHECK:預期毛利 < mult × 來回手續費(領展事件)
@@ -276,15 +333,25 @@ def scan_portfolio(session, prices, on_date: Date = None):
     upl = open_position_pnl(session, prices)
     out = []
 
-    # MAX_POSITION_WEIGHT(現況版:唔使等買入先知超標)
+    # MAX_POSITION_WEIGHT(分倉:單一標的按倉位上限 + sleeve 合計上限)
     r = rules.get("MAX_POSITION_WEIGHT")
     if r and nav:
-        for sym, m in mv.items():
-            w = m / nav * 100
-            if w > r["pct"]:
-                out.append(_v("MAX_POSITION_WEIGHT", sym,
-                              f"{sym} 現佔組合 {w:.1f}%,超過上限 {r['pct']}%",
-                              weight_pct=round(w, 1), limit_pct=r["pct"]))
+        sw = bk.sleeve_weights(session, prices)
+        for b, s in sw["sleeves"].items():
+            meta = BUCKETS.get(b, {})
+            for h in s["holdings"]:
+                if h["single_over"]:
+                    out.append(_v("MAX_POSITION_WEIGHT", h["symbol"],
+                                  f"{h['name']}({h['symbol']})現佔 {h['weight_pct']:.1f}%,"
+                                  f"超過{meta.get('name', b)}單一上限 {h['single_max']}%",
+                                  weight_pct=round(h["weight_pct"], 1),
+                                  limit_pct=h["single_max"], bucket=b))
+            if s.get("over"):
+                out.append(_v("MAX_POSITION_WEIGHT", f"_sleeve_{b}",
+                              f"{s['name']}合計佔 {s['weight_pct']:.1f}%,"
+                              f"超過倉位上限 {s['sleeve_max']}%",
+                              weight_pct=round(s["weight_pct"], 1),
+                              limit_pct=s["sleeve_max"], bucket=b, sleeve=True))
 
     # MAX_SECTOR_WEIGHT(現況版)
     r = rules.get("MAX_SECTOR_WEIGHT")
@@ -300,13 +367,15 @@ def scan_portfolio(session, prices, on_date: Date = None):
                               f"「{sec}」板塊現佔 {w:.1f}%,超過上限 {r['pct']}%",
                               sector=sec, weight_pct=round(w, 1)))
 
-    # STALE_LOSER:lot 級 — 蝕超過 loss_pct% 且持有超過 days 日
+    # STALE_LOSER:非核心倉 lot 級 — 蝕超過 loss_pct% 且持有超過 days 日
     r = rules.get("STALE_LOSER")
     if r:
         lots = (session.query(Lot, Instrument)
                 .join(Instrument, Lot.instrument_id == Instrument.id)
                 .filter(Lot.qty_remaining > 0).all())
         for lot, inst in lots:
+            if bk.bucket_of(session, inst.symbol) == "core":
+                continue                        # 核心信仰倉豁免
             px = prices.get(inst.symbol)
             open_px = float(lot.open_price)
             if px is None or open_px == 0:
@@ -314,27 +383,71 @@ def scan_portfolio(session, prices, on_date: Date = None):
             loss_pct = (px - open_px) / open_px * 100
             days = (ref_dt - lot.open_dt).days
             if loss_pct <= -r["loss_pct"] and days > r["days"]:
+                act = "強制賣出一半、餘下檢討" if r.get("force_sell_half") else "強制檢討"
                 out.append(_v("STALE_LOSER", inst.symbol,
-                              f"{inst.symbol} 有一批 {float(lot.qty_remaining):g} 股"
-                              f"蝕緊 {abs(loss_pct):.0f}%、揸咗 {days} 日 — 強制檢討",
+                              f"{config_short(inst)} 有一批 {float(lot.qty_remaining):g} 股"
+                              f"蝕緊 {abs(loss_pct):.0f}%、揸咗 {days} 日 — {act}",
                               lot_id=lot.id, loss_pct=round(loss_pct, 1),
                               hold_days=days))
 
-    # STOP_LOSS_ALERT:倉位級浮虧穿線(sector 標「投機」用 spec 門檻)
+    # STOP_LOSS_ALERT:分倉止蝕(衛星 −20 強制 / 核心地基 −30 檢討 / 被動免)
     r = rules.get("STOP_LOSS_ALERT")
     if r:
-        spec_syms = {i.symbol for i in session.query(Instrument)
-                     .filter(Instrument.sector == "投機").all()}
         for sym, v in upl.items():
             if not v or v["unreal_pct"] is None:
                 continue
-            th = r["spec"] if sym in spec_syms else r["satellite"]
+            b = bk.bucket_of(session, sym)
+            meta = BUCKETS.get(b, {})
+            th = meta.get("stop_pct")
+            if th is None:
+                continue                        # 被動收入倉唔止蝕
             if v["unreal_pct"] * 100 <= -th:
+                forced = meta.get("force_stop")
+                act = "強制止蝕(必須執行)" if forced else "檢討"
                 out.append(_v("STOP_LOSS_ALERT", sym,
-                              f"{sym} 浮虧 {abs(v['unreal_pct'])*100:.0f}% "
-                              f"已穿 −{th}% 止蝕警戒線",
+                              f"{bk.short_name(sym)}({sym})浮虧 "
+                              f"{abs(v['unreal_pct'])*100:.0f}% 穿 {meta.get('name', b)} "
+                              f"−{th}% 止蝕線 — {act}",
                               unreal_pct=round(v["unreal_pct"] * 100, 1),
-                              threshold_pct=th))
+                              threshold_pct=th, bucket=b, forced=forced))
+
+    # NEW_FOMO_CAP:整個衛星/投機倉合計上限
+    r = rules.get("NEW_FOMO_CAP")
+    if r and nav:
+        sw = bk.sleeve_weights(session, prices)
+        sat = sw["sleeves"].get("satellite", {})
+        w = sat.get("weight_pct", 0)
+        if w > r["total_pct"]:
+            out.append(_v("NEW_FOMO_CAP", "_sleeve_satellite",
+                          f"衛星/投機倉合計 {w:.1f}%,超過總量上限 {r['total_pct']}% "
+                          "— 停止新增 FOMO,先減磅",
+                          weight_pct=round(w, 1), limit_pct=r["total_pct"]))
+
+    # CASH_BUFFER_RULE:現金緩衝(需要全資產有現金數據)
+    r = rules.get("CASH_BUFFER_RULE")
+    if r:
+        cash, total_assets = _cash_and_total(session, prices)
+        if total_assets > 0:
+            if cash is None:
+                out.append(_v("CASH_BUFFER_RULE", "_cash",
+                              "未有現金/銀行結餘數據 — 去全資產頁更新先計到緩衝",
+                              cash_pct=None))
+            elif cash / total_assets * 100 < r["min_pct"]:
+                out.append(_v("CASH_BUFFER_RULE", "_cash",
+                              f"現金只佔 {cash/total_assets*100:.1f}%,低過 "
+                              f"{r['min_pct']}% 緩衝下限 — 補回現金先好買新標的",
+                              cash_pct=round(cash / total_assets * 100, 1)))
+
+    # QUARTERLY_REBALANCE:季尾提示 + 列出要處理嘅超權重/止蝕標的
+    r = rules.get("QUARTERLY_REBALANCE")
+    if r is not None:
+        todo = [x for x in out if x["rule"] in
+                ("MAX_POSITION_WEIGHT", "STOP_LOSS_ALERT", "STALE_LOSER")]
+        if _is_quarter_end(on_date) and todo:
+            out.append(_v("QUARTERLY_REBALANCE", "_portfolio",
+                          f"季尾再平衡:有 {len(todo)} 項超權重/止蝕待處理,"
+                          "減磅至上限並把資金補回地基/被動倉",
+                          items=len(todo)))
 
     # WEEKLY_CIRCUIT_BREAKER(現況版)
     r = rules.get("WEEKLY_CIRCUIT_BREAKER")
@@ -347,6 +460,37 @@ def scan_portfolio(session, prices, on_date: Date = None):
                           week_realized_hkd=round(wk)))
 
     return out
+
+
+def config_short(inst):
+    """instrument → 簡稱(name fallback)。"""
+    return bk.short_name(inst.symbol, inst.name)
+
+
+def _cash_and_total(session, prices):
+    """(現金HKD, 總資產HKD)— 現金來自 assets_other category cash;冇就 (None, 股票市值)。"""
+    from .assets import latest_assets, total_assets_hkd
+    cash_rows = latest_assets(session, category="cash")
+    cash = sum(a["value_hkd"] for a in cash_rows) if cash_rows else None
+    total = total_assets_hkd(session, prices)
+    return cash, total
+
+
+def _is_quarter_end(on_date: Date) -> bool:
+    """喺季度最後一個月(3/6/9/12)嘅後段(≥25 號)就當季尾。"""
+    return on_date.month in (3, 6, 9, 12) and on_date.day >= 25
+
+
+def _satellite_new_this_month(session, ref_dt):
+    """當月(ref_dt 所屬月)已買入嘅衛星倉金額(HKD)。NEW_FOMO_CAP 月度上限用。"""
+    start = datetime(ref_dt.year, ref_dt.month, 1)
+    rows = (session.query(Transaction, Instrument)
+            .join(Instrument, Transaction.instrument_id == Instrument.id)
+            .filter(Transaction.type == "BUY",
+                    Transaction.trade_dt >= start,
+                    Transaction.trade_dt <= ref_dt).all())
+    return sum(to_hkd(float(t.price) * float(t.qty), t.ccy)
+               for t, inst in rows if bk.bucket_of(session, inst.symbol) == "satellite")
 
 
 # ---------- 3. 歷史重掃(交易紀律回顧,行為儀表板核心輸入) ----------

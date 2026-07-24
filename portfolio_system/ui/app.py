@@ -24,7 +24,7 @@ from app.models import make_session, Transaction, Instrument, RuleViolation, Rul
 from app.importer import import_stockerx_csv
 from app.fifo import rebuild_lots
 from app import (metrics, rules, behavior, assets, reports, income, benchmark,
-                 fx, advisor, committee)
+                 fx, advisor, committee, buckets)
 from app.prices import YFinanceProvider, ManualPriceProvider, store_eod, latest_prices
 from app.performance import portfolio_xirr, build_snapshot, twrr
 from app import config
@@ -47,6 +47,7 @@ def get_session():
         import_stockerx_csv(s, CSV_DEFAULT)
         rebuild_lots(s)
     rules.seed_rules(s)
+    buckets.assign_defaults(s)                     # 四大倉位預設分類
     return s
 
 
@@ -170,6 +171,27 @@ with tab1:
          for s, v in wser.items()]),
         use_container_width=True, hide_index=True, height=340)
 
+    # 四大倉位配置(sleeve 權重 vs 目標)
+    st.subheader("四大倉位配置(vs 目標上限)")
+    sw = buckets.sleeve_weights(session, prices)
+    scols = st.columns(4)
+    for i, b in enumerate(config.BUCKET_ORDER):
+        s = sw["sleeves"].get(b, {})
+        meta = config.BUCKETS[b]
+        lo = meta.get("sleeve_min")
+        hi = meta.get("sleeve_max")
+        rng = (f"{lo}–{hi}%" if lo else f"≤{hi}%")
+        w = s.get("weight_pct", 0)
+        if s.get("over"):
+            tone, note = "neg", f"超標(上限 {hi}%)"
+        elif s.get("under"):
+            tone, note = "auto:-1", f"未達下限 {lo}%"
+        else:
+            tone, note = "pos", f"目標 {rng}"
+        theme.stat(scols[i], meta["name"], f"{w:.1f}%", sub=note, tone=tone)
+    st.caption("核心信仰倉 ≤50%(單一 ≤40%)· 地基股息倉 20–30%(單一 ≤20%)· "
+               "被動收入倉 15–25% · 衛星投機倉 ≤10%(單一 ≤5%)。超標會喺行為儀表板列出。")
+
 # ---- 收益(§6.2:三組成分開 + 分母口徑註明 + 股息 + yield-on-cost) ----
 with tab_inc:
     basis = st.radio("收益 % 分母口徑", ["open_cost", "total_in"],
@@ -263,7 +285,9 @@ with tab2:
         # 每股賺蝕%:(現價 − 平均成本)/ 平均成本;成本 0(送股)→ 無意義
         ps_pct = ((px - avg) / avg * 100) if (px is not None and avg) else None
         rows.append({
-            "簡稱": config.short_name(sym), "代號": sym, "股數": p["shares"],
+            "簡稱": config.short_name(sym), "代號": sym,
+            "倉位": config.BUCKETS[buckets.bucket_of(session, sym)]["name"],
+            "股數": p["shares"],
             "平均成本": round(avg, 3), "現價": px,
             "每股賺蝕%": round(ps_pct, 1) if ps_pct is not None else None,
             "市值HKD": round(u["mv_hkd"]) if u else None,
@@ -278,6 +302,27 @@ with tab2:
                  use_container_width=True, hide_index=True)
     st.caption("每股賺蝕% =(現價−平均成本)/平均成本 · 平均成本只計現有 lot(賣清歸零)· "
                "三欄口徑永遠分開,唔加埋。")
+
+    with st.expander("調整分倉(核心/地基/被動/衛星)"):
+        st.caption("改咗即時影響分層規則(單一上限、止蝕、STALE)。預設:TSLA=核心、"
+                   "中移/中油=地基、VOO/2802/3416/3466=被動、其餘=衛星。")
+        bnames = {b: config.BUCKETS[b]["name"] for b in config.BUCKET_ORDER}
+        rev = {v: k for k, v in bnames.items()}
+        bed = pd.DataFrame([
+            {"代號": sym, "簡稱": config.short_name(sym),
+             "倉位": bnames[buckets.bucket_of(session, sym)]}
+            for sym in metrics.open_positions(session)])
+        edited = st.data_editor(
+            bed, use_container_width=True, hide_index=True, key="bucket_ed",
+            column_config={"倉位": st.column_config.SelectboxColumn(
+                "倉位", options=list(bnames.values()), required=True),
+                "代號": st.column_config.TextColumn(disabled=True),
+                "簡稱": st.column_config.TextColumn(disabled=True)})
+        if st.button("儲存分倉"):
+            for _, r in edited.iterrows():
+                buckets.set_bucket(session, r["代號"], rev[r["倉位"]])
+            st.success("分倉已更新")
+            st.rerun()
 
 # ---- 已平倉(§6.4) ----
 with tab3:
