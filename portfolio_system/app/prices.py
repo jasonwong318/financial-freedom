@@ -47,7 +47,7 @@ def store_eod(session, on_date: Date, prices: dict) -> int:
     insts = {i.symbol: i for i in session.query(Instrument).all()}
     n = 0
     for sym, px in prices.items():
-        if px is None or sym not in insts:
+        if px is None or px != px or sym not in insts:   # None 或 NaN 都跳過
             continue
         row = session.get(PriceEOD, (insts[sym].id, on_date))
         if row:
@@ -60,11 +60,13 @@ def store_eod(session, on_date: Date, prices: dict) -> int:
 
 
 def latest_prices(session) -> dict:
-    """{symbol: close} — 每標的攞最近一日 EOD。"""
+    """{symbol: close} — 每標的攞最近一日有效 EOD(跳過 close=None 嘅行)。"""
     rows = (session.query(PriceEOD, Instrument)
             .join(Instrument, PriceEOD.instrument_id == Instrument.id)
             .order_by(PriceEOD.date).all())
     out = {}
     for p, inst in rows:                      # 按日期升序,後面覆蓋前面 = 最新
+        if p.close is None:
+            continue                          # yfinance 攞唔到嗰隻 → 唔好爆
         out[inst.symbol] = float(p.close)
     return out
