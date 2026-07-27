@@ -20,7 +20,9 @@ fi
 cd portfolio_system
 
 echo "==> 3/4 裝依賴"
-pip3 install -r requirements.txt
+# 新版 Ubuntu(PEP 668)會擋 system-wide pip;失敗就加 --break-system-packages 重試
+pip3 install -r requirements.txt \
+  || pip3 install --break-system-packages -r requirements.txt
 
 echo "==> 4/4 建 portfolio.db(冇就自動匯入預設 CSV)"
 python3 - <<'PY'
