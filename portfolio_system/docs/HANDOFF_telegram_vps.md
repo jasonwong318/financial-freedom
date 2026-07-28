@@ -144,6 +144,7 @@ Description=Investment Committee App
 After=network-online.target
 
 [Service]
+User=ubuntu
 WorkingDirectory=/home/ubuntu/financial-freedom/portfolio_system
 Environment=PORTFOLIO_DB_URL=sqlite:////home/ubuntu/financial-freedom/portfolio_system/portfolio.db
 ExecStart=/usr/bin/python3 -m streamlit run ui/app.py --server.address 127.0.0.1 --server.port 8501
@@ -161,6 +162,7 @@ Description=Investment Committee Telegram Gate Bot
 After=network-online.target
 
 [Service]
+User=ubuntu
 WorkingDirectory=/home/ubuntu/financial-freedom/portfolio_system
 Environment=TELEGRAM_BOT_TOKEN=123456:AA...
 Environment=TELEGRAM_CHAT_ID=你的chat_id
